@@ -1,36 +1,71 @@
 package io.matedata.identity.application;
 
-import io.matedata.shared.infrastructure.DocumentStore;
-import io.matedata.shared.interfaces.ApiException;
-import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import io.matedata.identity.*;
+import io.matedata.shared.ApplicationException;
+import io.matedata.shared.ApplicationException.Kind;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
 
 @Service
 public class IdentityService {
-    public record User(String username,String displayName,String role) {}
-    public record Account(String username,String displayName,String role,String passwordHash) { public User publicView(){return new User(username,displayName,role);} }
-    private final DocumentStore store;
-    private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder(12);
-    public IdentityService(DocumentStore store,@Value("${matedata.admin-password:}") String password) {
-        this.store=store;
-        if(store.get("identity","admin",Account.class).isEmpty()) {
-            if(password.isBlank()) { password=UUID.randomUUID().toString(); System.out.println("MateData first-run admin password: "+password); }
-            create("admin","管理员","ADMIN",password);
-        }
+  public record User(String username, String displayName, String role) {}
+
+  private final AccountRepository repository;
+  private final PasswordHasher encoder;
+  private final String dummyPasswordHash;
+
+  public IdentityService(
+      AccountRepository repository,
+      PasswordHasher encoder,
+      @Value("${matedata.admin-password:}") String password) {
+    this.repository = repository;
+    this.encoder = encoder;
+    this.dummyPasswordHash = encoder.encode(UUID.randomUUID().toString());
+    if (repository.find("admin").isEmpty()) {
+      if (password.isBlank()) {
+        password = UUID.randomUUID().toString();
+        System.out.println("MateData first-run admin password: " + password);
+      }
+      create("admin", "管理员", "ADMIN", password);
     }
-    public User login(String username,String password) {
-        var account=store.get("identity",username==null?"":username,Account.class);
-        if(account.isEmpty() || password==null || !encoder.matches(password,account.get().passwordHash())) throw new ApiException(401,"INVALID_CREDENTIALS","用户名或密码错误");
-        return account.get().publicView();
-    }
-    public User create(String username,String name,String role,String password) {
-        if(username==null || !username.matches("[a-zA-Z][a-zA-Z0-9_]{2,40}") || name==null || name.isBlank()) throw new IllegalArgumentException("用户名或显示名称不合法");
-        if(!Set.of("ADMIN","ANALYST","VIEWER").contains(role)) throw new IllegalArgumentException("角色不合法");
-        if(password==null || password.length()<12 || password.length()>72) throw new IllegalArgumentException("密码长度必须为 12–72 字符");
-        if(store.get("identity",username,Account.class).isPresent()) throw new ApiException(409,"CONFLICT","用户名已存在");
-        var a=new Account(username,name,role,encoder.encode(password));store.save("identity",username,a);return a.publicView();
-    }
-    public List<User> users(){return store.list("identity",Account.class).stream().map(Account::publicView).toList();}
+  }
+
+  public User login(String username, String password) {
+    var account = repository.find(username == null ? "" : username);
+    boolean valid =
+        password != null
+            && password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 72
+            && encoder.matches(
+                password, account.map(Account::passwordHash).orElse(dummyPasswordHash));
+    if (account.isEmpty() || !valid)
+      throw new ApplicationException(Kind.INVALID_CREDENTIALS, "用户名或密码错误");
+    return publicView(account.get());
+  }
+
+  public User create(String username, String name, String role, String password) {
+    if (username == null
+        || !username.matches("[a-zA-Z][a-zA-Z0-9_]{2,40}")
+        || name == null
+        || name.isBlank()) throw new IllegalArgumentException("用户名或显示名称不合法");
+    if (role == null || !Set.of("ADMIN", "ANALYST", "VIEWER").contains(role))
+      throw new IllegalArgumentException("角色不合法");
+    if (password == null
+        || password.length() < 12
+        || password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72)
+      throw new IllegalArgumentException("密码至少 12 字符且 UTF-8 编码不超过 72 字节");
+    if (repository.find(username).isPresent())
+      throw new ApplicationException(Kind.CONFLICT, "用户名已存在");
+    var a = new Account(username, name, role, encoder.encode(password));
+    repository.save(a);
+    return publicView(a);
+  }
+
+  private static User publicView(Account account) {
+    return new User(account.username(), account.displayName(), account.role());
+  }
+
+  public List<User> users() {
+    return repository.all().stream().map(IdentityService::publicView).toList();
+  }
 }

@@ -1,0 +1,32 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '26.10.0'
+          cache: npm
+          cache-dependency-path: matedata-ui/package-lock.json
+      - name: Test and package the single-origin application
+        run: ./scripts/build.sh
+      - name: Verify bundled UI and executable manifest
+        shell: bash
+        run: |
+          jar tf matedata-server/target/matedata-server-0.1.0-SNAPSHOT.jar > /tmp/matedata-jar-entries
+          grep -q '^BOOT-INF/classes/static/index.html$' /tmp/matedata-jar-entries
+          grep -q '^BOOT-INF/classes/static/assets/.*\.js$' /tmp/matedata-jar-entries
+          unzip -p matedata-server/target/matedata-server-0.1.0-SNAPSHOT.jar META-INF/MANIFEST.MF > /tmp/matedata-manifest
+          grep -q '^Main-Class: org.springframework.boot.loader.launch.JarLauncher' /tmp/matedata-manifest

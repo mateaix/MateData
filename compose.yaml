@@ -1,0 +1,19 @@
+services:
+  matedata:
+    build:
+      context: .
+    image: matedata:local
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      BIND_ADDRESS: 0.0.0.0
+      MATEDATA_DATA_DIR: /app/data
+      MATEDATA_DATABASE_URL: "jdbc:h2:file:/app/data/matedata;DB_CLOSE_ON_EXIT=FALSE"
+      MATEDATA_ADMIN_PASSWORD: "${MATEDATA_ADMIN_PASSWORD:?Set MATEDATA_ADMIN_PASSWORD before starting MateData}"
+      MATEDATA_ENCRYPTION_KEY: "${MATEDATA_ENCRYPTION_KEY:-}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+    volumes:
+      - matedata-data:/app/data
+    restart: unless-stopped
+volumes:
+  matedata-data:

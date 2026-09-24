@@ -1,0 +1,14 @@
+.git
+.github
+**/node_modules
+**/target
+**/dist
+**/.DS_Store
+.env
+.env.*
+!.env.example
+.local
+data
+**/*.log
+**/playwright-report
+**/test-results

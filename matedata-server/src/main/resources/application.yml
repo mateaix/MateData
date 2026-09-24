@@ -18,6 +18,10 @@ spring:
   threads:
     virtual:
       enabled: true
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
+    clean-disabled: true
   jackson:
     default-property-inclusion: always
 management:
