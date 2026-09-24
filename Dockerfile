@@ -19,6 +19,7 @@ RUN groupadd --gid 10001 matedata \
     && mkdir -p /app/data \
     && chown -R 10001:10001 /app
 COPY --from=build --chown=10001:10001 /build/matedata-server/target/matedata-server-0.1.0-SNAPSHOT.jar /app/matedata.jar
+COPY --chown=10001:10001 LICENSE NOTICE /app/
 ENV BIND_ADDRESS=0.0.0.0 \
     MATEDATA_DATA_DIR=/app/data \
     MATEDATA_DATABASE_URL="jdbc:h2:file:/app/data/matedata;DB_CLOSE_ON_EXIT=FALSE"
