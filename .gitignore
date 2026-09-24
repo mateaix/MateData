@@ -1,12 +1,45 @@
+# Java / Maven build output
 target/
+*.class
+*.iml
+.idea/
+
+# Frontend dependencies, build output and caches
 node_modules/
 dist/
-.DS_Store
+.vite/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and secrets; keep shareable templates
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
 .local/
+
+# Runtime data, embedded databases and diagnostics
 data/
+logs/
 *.log
+*.mv.db
+*.trace.db
+*.lock.db
+*.h2.db
+*.hprof
+*.jfr
+
+# Browser and Python test artifacts
 playwright-report/
 test-results/
 __pycache__/
 *.pyc
+
+# OS / editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

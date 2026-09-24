@@ -53,7 +53,14 @@ MateData 采用 **DDD 模块化单体**：一个 Java 服务、一个 Vue 界面
 
 ## 本地运行
 
-取得项目源码后，先进入仓库根目录。准备 JDK 25 和 Node.js 26.10.0；首次构建需要网络以下载 Maven 和 npm 依赖。确保 `JAVA_HOME` 指向 JDK 25，`node --version` 与 `.nvmrc` 一致：
+克隆源码并进入仓库根目录：
+
+```bash
+git clone https://github.com/mateaix/MateData.git
+cd MateData
+```
+
+准备 JDK 25 和 Node.js 26.10.0；首次构建需要网络以下载 Maven 和 npm 依赖。确保 `JAVA_HOME` 指向 JDK 25，`node --version` 与 `.nvmrc` 一致：
 
 ```bash
 ./scripts/build.sh
