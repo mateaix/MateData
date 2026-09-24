@@ -22,6 +22,10 @@ public class JdbcModelRepository implements ModelRepository {
     return store.list("semantic", SemanticModel.class);
   }
 
+  public boolean createIfAbsent(SemanticModel model) {
+    return store.insertIfAbsent("semantic", model.id(), model);
+  }
+
   public void save(SemanticModel model) {
     store.save("semantic", model.id(), model);
   }

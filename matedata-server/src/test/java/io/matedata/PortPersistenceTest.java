@@ -89,6 +89,36 @@ class PortPersistenceTest {
   }
 
   @Test
+  void refusesNumericAggregationOnTextColumnsBeforePublishing() throws Exception {
+    var store = store();
+    var vault = new SecretVault(directory.toString(), "");
+    var catalog =
+        new io.matedata.catalog.application.CatalogService(
+            new io.matedata.catalog.infrastructure.JdbcSourceRepository(store),
+            vault,
+            new io.matedata.catalog.infrastructure.BusinessConnections(vault));
+    var repository = new io.matedata.semantic.infrastructure.JdbcModelRepository(store);
+    var service = new io.matedata.semantic.application.SemanticService(repository, catalog);
+    for (String aggregate : java.util.List.of("SUM", "AVG")) {
+      var invalid =
+          new io.matedata.semantic.SemanticModel(
+              "invalid_numeric",
+              "Invalid metric",
+              "",
+              "demo_sales",
+              "sales",
+              java.util.List.of(
+                  new io.matedata.semantic.SemanticModel.Metric(
+                      "revenue", "销售额", "region", aggregate, java.util.List.of())),
+              java.util.List.of());
+      assertThatThrownBy(() -> service.create(invalid))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("数值");
+      assertThat(repository.find(invalid.id())).isEmpty();
+    }
+  }
+
+  @Test
   void semanticServiceValidatesPhysicalColumnsBeforePersistingChanges() throws Exception {
     var store = store();
     var vault = new SecretVault(directory.toString(), "");

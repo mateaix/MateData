@@ -6,7 +6,8 @@ import java.util.Optional;
 public interface AccountRepository {
   Optional<Account> find(String username);
 
-  void save(Account account);
+  /** Atomically creates an account; returns false if the username already exists. */
+  boolean createIfAbsent(Account account);
 
   List<Account> all();
 }

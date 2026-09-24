@@ -58,6 +58,22 @@ class PlatformIntegrationTest {
   }
 
   @Test
+  void rejectsChunkedOversizedJsonBeforeLoginProcessing() throws Exception {
+    byte[] body = new byte[256 * 1024 + 1];
+    var request =
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/v1/auth/login"))
+            .header("X-MateData-Request", "1")
+            .header("Content-Type", "application/json")
+            .POST(
+                HttpRequest.BodyPublishers.ofInputStream(
+                    () -> new java.io.ByteArrayInputStream(body)))
+            .build();
+    var response = client().send(request, HttpResponse.BodyHandlers.ofString());
+    assertThat(response.statusCode()).isEqualTo(413);
+    assertThat(json.readTree(response.body()).path("code").asText()).isEqualTo("PAYLOAD_TOO_LARGE");
+  }
+
+  @Test
   void rejectsAnonymousAccess() throws Exception {
     assertThat(call(client(), "GET", "/datasets", null).statusCode()).isEqualTo(401);
   }
@@ -196,6 +212,44 @@ class PlatformIntegrationTest {
     assertThat(run.path("status").asText()).isEqualTo("SUCCEEDED");
     assertThat(run.path("rows").size()).isEqualTo(1);
     assertThat(run.path("rows").get(0).path("region").asText()).isEqualTo("华东");
+    var visible = json.readTree(call(analyst, "GET", "/datasets", null).body());
+    JsonNode scopedDataset = null;
+    for (var dataset : visible)
+      if (dataset.path("id").asText().equals("restricted_sales")) scopedDataset = dataset;
+    assertThat(scopedDataset).isNotNull();
+    String fingerprint = scopedDataset.path("scopeFingerprint").asText();
+    assertThat(fingerprint).matches("[a-f0-9]{64}");
+    assertThat(run.path("scopeFingerprint").asText()).isEqualTo(fingerprint);
+    assertThat(
+            json.readTree(call(analyst, "GET", "/runs/" + run.path("id").asText(), null).body())
+                .path("scopeFingerprint")
+                .asText())
+        .isEqualTo(fingerprint);
+    assertThat(
+            call(
+                    admin,
+                    "PUT",
+                    "/permissions/" + username + "/restricted_sales",
+                    Map.of(
+                        "enabled",
+                        true,
+                        "metrics",
+                        java.util.List.of("revenue"),
+                        "dimensions",
+                        java.util.List.of("region"),
+                        "rowFilters",
+                        Map.of("region", "华南")))
+                .statusCode())
+        .isEqualTo(200);
+    var changed = json.readTree(call(analyst, "GET", "/datasets", null).body());
+    for (var dataset : changed)
+      if (dataset.path("id").asText().equals("restricted_sales")) {
+        assertThat(dataset.path("scopeFingerprint").asText()).isNotEqualTo(fingerprint);
+        assertThat(dataset.path("metrics")).isEqualTo(scopedDataset.path("metrics"));
+        assertThat(dataset.has("rowFilters")).isFalse();
+      }
+    assertThat(call(analyst, "GET", "/runs/" + run.path("id").asText(), null).statusCode())
+        .isEqualTo(403);
     assertThat(call(admin, "GET", "/runs/" + run.path("id").asText(), null).statusCode())
         .isEqualTo(404);
     assertThat(call(analyst, "GET", "/sources", null).statusCode()).isEqualTo(403);

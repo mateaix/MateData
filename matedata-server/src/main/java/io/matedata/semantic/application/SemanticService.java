@@ -25,7 +25,8 @@ public class SemanticService {
     if (models.find(model.id()).isPresent())
       throw new ApplicationException(Kind.CONFLICT, "数据集标识已存在");
     var published = canonical(model);
-    models.save(published);
+    if (!models.createIfAbsent(published))
+      throw new ApplicationException(Kind.CONFLICT, "数据集标识已存在");
     return published;
   }
 
@@ -50,13 +51,15 @@ public class SemanticService {
     var metrics =
         model.metrics().stream()
             .map(
-                m ->
-                    new SemanticModel.Metric(
-                        m.id(),
-                        m.name(),
-                        resolve(m.column(), columns),
-                        m.aggregation(),
-                        m.aliases()))
+                m -> {
+                  String column = resolve(m.column(), columns);
+                  ValueType type =
+                      m.aggregation().equals("COUNT") ? null : valueType(table, column);
+                  if (Set.of("SUM", "AVG").contains(m.aggregation()) && type != ValueType.NUMBER)
+                    throw new IllegalArgumentException("SUM 与 AVG 指标必须选择数值字段");
+                  return new SemanticModel.Metric(
+                      m.id(), m.name(), column, m.aggregation(), m.aliases());
+                })
             .toList();
     var dimensions =
         model.dimensions().stream()
@@ -88,16 +91,20 @@ public class SemanticService {
             .orElseThrow()
             .type()
             .toUpperCase(Locale.ROOT);
-    if (type.equals("TIMESTAMPTZ") || type.contains("TIMESTAMP WITH TIME ZONE"))
+    if (type.equals("TIMESTAMPTZ") || type.equals("TIMESTAMP WITH TIME ZONE"))
       return ValueType.TIMESTAMP_WITH_ZONE;
-    if (type.startsWith("TIMESTAMP") || type.equals("DATETIME")) return ValueType.TIMESTAMP;
+    if (Set.of("TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE", "DATETIME").contains(type))
+      return ValueType.TIMESTAMP;
     if (type.equals("DATE")) return ValueType.DATE;
     if (type.equals("TIME") || type.equals("TIME WITHOUT TIME ZONE")) return ValueType.TIME;
     if (type.equals("BOOLEAN") || type.equals("BOOL")) return ValueType.BOOLEAN;
     if (type.matches(
         "(TINYINT|SMALLINT|MEDIUMINT|INTEGER|INT|BIGINT|INT[248]|SERIAL|BIGSERIAL|DECIMAL|NUMERIC|REAL|FLOAT[48]?|DOUBLE( PRECISION)?)( UNSIGNED)?"))
       return ValueType.NUMBER;
-    return ValueType.TEXT;
+    if (type.matches(
+        "(CHAR|CHARACTER|VARCHAR|CHARACTER VARYING|NCHAR|NVARCHAR|LONGVARCHAR|LONGNVARCHAR|BPCHAR|TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|CLOB|NCLOB|CHARACTER LARGE OBJECT|NATIONAL CHARACTER LARGE OBJECT)"))
+      return ValueType.TEXT;
+    throw new IllegalArgumentException("不支持的物理字段类型，请选择数值、布尔、字符或日期时间字段");
   }
 
   private String resolve(String requested, List<String> names) {

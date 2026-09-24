@@ -45,6 +45,7 @@ public final class RunResponses {
         run.createdAt(),
         run.answer(),
         run.error(),
-        run.steps());
+        run.steps(),
+        run.scopeFingerprint());
   }
 }

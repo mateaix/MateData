@@ -12,7 +12,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 @Component
-public class SecretVault implements io.matedata.shared.CredentialCipher {
+public class SecretVault
+    implements io.matedata.shared.CredentialCipher, io.matedata.identity.ScopeTokenEncoder {
   private final byte[] key;
 
   public SecretVault(
@@ -63,6 +64,21 @@ public class SecretVault implements io.matedata.shared.CredentialCipher {
       return new String(c.doFinal(Base64.getDecoder().decode(parts[1])), StandardCharsets.UTF_8);
     } catch (Exception e) {
       throw new IllegalStateException("凭证解密失败，请检查加密密钥", e);
+    }
+  }
+
+  @Override
+  public String encodeFingerprint(String fingerprint) {
+    if (fingerprint == null) return null;
+    try {
+      var mac = javax.crypto.Mac.getInstance("HmacSHA256");
+      mac.init(new SecretKeySpec(key, "HmacSHA256"));
+      byte[] scopeKey = mac.doFinal("matedata:scope-signing:v1".getBytes(StandardCharsets.UTF_8));
+      mac.init(new SecretKeySpec(scopeKey, "HmacSHA256"));
+      return java.util.HexFormat.of()
+          .formatHex(mac.doFinal(fingerprint.getBytes(StandardCharsets.UTF_8)));
+    } catch (java.security.GeneralSecurityException failure) {
+      throw new IllegalStateException("无法生成授权版本标识", failure);
     }
   }
 }

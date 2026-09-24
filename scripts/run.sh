@@ -9,6 +9,34 @@ if [[ ! -f "$MATEDATA_JAR_PATH" ]]; then
   printf '%s\n' 'Application JAR not found. Run ./scripts/build.sh first.' >&2
   exit 1
 fi
-# Always run at repository root: the default database and encryption key live in ./data.
-# JAVA_TOOL_OPTIONS may be used for JVM options; arguments here are Spring application options.
-exec "$MATEDATA_JAVA_BIN" -jar "$MATEDATA_JAR_PATH" "$@"
+# A running Boot JAR lazily reads nested classes. Rebuilding target/ must not replace its bytes.
+mkdir -p "$MATEDATA_ROOT/.local/runtime"
+MATEDATA_RUNTIME_DIR="$(mktemp -d "$MATEDATA_ROOT/.local/runtime/run.XXXXXX")"
+cleanup_runtime() {
+  rm -f -- "$MATEDATA_RUNTIME_DIR/application.jar"
+  rmdir -- "$MATEDATA_RUNTIME_DIR"
+}
+trap cleanup_runtime EXIT
+cp "$MATEDATA_JAR_PATH" "$MATEDATA_RUNTIME_DIR/application.jar"
+# Keep the repository as cwd so metadata and keys always resolve to ./data.
+"$MATEDATA_JAVA_BIN" -jar "$MATEDATA_RUNTIME_DIR/application.jar" "$@" &
+MATEDATA_APPLICATION_PID=$!
+MATEDATA_SIGNAL_EXIT=0
+forward_signal() {
+  MATEDATA_SIGNAL_EXIT="$1"
+  kill -TERM "$MATEDATA_APPLICATION_PID" 2>/dev/null || true
+}
+trap 'forward_signal 130' INT
+trap 'forward_signal 143' TERM
+set +e
+wait "$MATEDATA_APPLICATION_PID"
+MATEDATA_APPLICATION_EXIT=$?
+# A signal can interrupt wait before Java has completed its graceful shutdown.
+while kill -0 "$MATEDATA_APPLICATION_PID" 2>/dev/null; do
+  wait "$MATEDATA_APPLICATION_PID"
+  MATEDATA_APPLICATION_EXIT=$?
+done
+if [[ "$MATEDATA_SIGNAL_EXIT" -ne 0 ]]; then
+  exit "$MATEDATA_SIGNAL_EXIT"
+fi
+exit "$MATEDATA_APPLICATION_EXIT"

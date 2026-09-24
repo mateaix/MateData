@@ -16,8 +16,16 @@ import type {
 import DatasetDesigner from "./components/DatasetDesigner.vue";
 import Governance from "./components/Governance.vue";
 import RunResult from "./components/RunResult.vue";
+import { createModelVersions, runMatchesDataset } from "./modelVersions";
 import { createSessionScope, StaleSessionError } from "./session";
 const session = createSessionScope();
+const modelVersions = createModelVersions();
+let queryVersion = 0;
+let pendingQueryDataset = "";
+let detailVersion = 0;
+let catalogVersion = 0;
+const changedScopeMessage =
+  "模型或权限已更新，无法确认本次结果的有效范围。请刷新语义模型后重试。";
 function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return session.request(() => apiRequest<T>(path, init));
 }
@@ -135,12 +143,27 @@ function sessionExpired() {
   clearSession();
   loginError.value = "会话已过期，请重新登录。";
 }
-const examples = [
-  { title: "区域表现", question: "各区域销售额", icon: "↗" },
-  { title: "品类洞察", question: "各品类利润", icon: "◈" },
-  { title: "增长趋势", question: "每月销售额趋势", icon: "⌁" },
-  { title: "渠道分析", question: "各渠道订单数", icon: "⤴" },
-];
+const examples = computed(() => {
+  const dataset = selectedDataset.value;
+  if (!dataset?.metrics.length) return [];
+  if (!dataset.dimensions.length)
+    return dataset.metrics.slice(0, 4).map((metric) => ({
+      title: metric.name,
+      question: metric.name,
+      icon: "↗",
+    }));
+  return dataset.dimensions.slice(0, 4).map((dimension, index) => {
+    const metric = dataset.metrics[index % dataset.metrics.length]!;
+    return {
+      title: `${dimension.name} · ${metric.name}`,
+      question: `各${dimension.name}${metric.name}`,
+      icon: ["↗", "◈", "⌁", "⤴"][index]!,
+    };
+  });
+});
+function datasetForRun(run: Run) {
+  return datasets.value.find((dataset) => dataset.id === run.datasetId);
+}
 function resetSourceDraft() {
   sourceDraft.value = {
     name: "",
@@ -172,6 +195,11 @@ watch(
 );
 function clearSession() {
   session.invalidate();
+  modelVersions.clear();
+  catalogVersion++;
+  queryVersion++;
+  pendingQueryDataset = "";
+  detailVersion++;
   booting.value = false;
   resetSourceDraft();
   datasetEditorVersion.value++;
@@ -224,18 +252,72 @@ function clearSession() {
 function message(e: unknown) {
   return e instanceof Error ? e.message : "操作失败，请稍后重试。";
 }
-async function handle<T>(work: () => Promise<T>): Promise<T | undefined> {
+async function handle<T>(
+  work: () => Promise<T>,
+  valid: () => boolean = () => true,
+): Promise<T | undefined> {
   const current = session.capture();
   error.value = "";
   try {
     return await work();
   } catch (e) {
-    if (!current() || e instanceof StaleSessionError) return;
+    if (!current() || !valid() || e instanceof StaleSessionError) return;
     if (e instanceof ApiError && e.status === 401) {
       clearSession();
       loginError.value = message(e);
     } else error.value = message(e);
   }
+}
+function replaceDatasets(value: Dataset[], preserveQueryVersion?: number) {
+  const changed = modelVersions.update(value);
+  if (changed.size) catalogVersion++;
+  const stillValid = (run: Run) =>
+    !changed.has(run.datasetId) &&
+    runMatchesDataset(
+      run,
+      value.find((dataset) => dataset.id === run.datasetId),
+    );
+  if (activeRun.value && !stillValid(activeRun.value)) activeRun.value = null;
+  if (detail.value && !stillValid(detail.value)) detail.value = null;
+  runs.value = runs.value.filter(stillValid);
+  if (
+    pendingQueryDataset &&
+    changed.has(pendingQueryDataset) &&
+    queryVersion !== preserveQueryVersion
+  ) {
+    queryVersion++;
+    pendingQueryDataset = "";
+    querying.value = false;
+  }
+  datasets.value = value;
+  if (!value.some((dataset) => dataset.id === datasetId.value))
+    datasetId.value = value[0]?.id || "";
+}
+/** Recover a legitimate new-scope response without replaying the database/model query.
+ * A response whose original local epoch was already invalidated is never eligible.
+ */
+async function reconcileRunModels(
+  responseRuns: Run[],
+  snapshot: Map<string, number>,
+  current: () => boolean,
+  preserveQueryVersion?: number,
+): Promise<Map<string, number>> {
+  const eligible = responseRuns.filter((run) =>
+    modelVersions.matches(run.datasetId, snapshot.get(run.datasetId)),
+  );
+  if (!eligible.some((run) => !runMatchesDataset(run, datasetForRun(run))))
+    return snapshot;
+  const beforeRefresh = catalogVersion;
+  const fresh = await request<Dataset[]>("/datasets");
+  if (!current() || beforeRefresh !== catalogVersion) return snapshot;
+  replaceDatasets(fresh, preserveQueryVersion);
+  const updated = new Map(snapshot);
+  for (const run of eligible) {
+    const version = modelVersions.capture(run.datasetId);
+    if (version === undefined) updated.delete(run.datasetId);
+    else updated.set(run.datasetId, version);
+  }
+  return updated;
 }
 async function loadBase() {
   const current = session.capture();
@@ -244,7 +326,7 @@ async function loadBase() {
     request<System>("/system"),
   ]);
   if (!current()) throw new StaleSessionError();
-  datasets.value = result[0];
+  replaceDatasets(result[0]);
   system.value = result[1];
   if (!datasetId.value) datasetId.value = datasets.value[0]?.id || "";
 }
@@ -306,7 +388,7 @@ async function navigate(target: Page) {
     }
     if (target === "datasets") {
       const value = await request<Dataset[]>("/datasets");
-      if (current()) datasets.value = value;
+      if (current()) replaceDatasets(value);
     }
     if (target === "evaluations") {
       const [value, reports] = await Promise.all([
@@ -326,9 +408,15 @@ async function navigate(target: Page) {
   if (current()) busy.value = false;
 }
 async function ask() {
-  if (!canExecute.value) return;
-  const current = session.capture();
-  if (!question.value.trim() || !datasetId.value) return;
+  if (!canExecute.value || !question.value.trim() || !datasetId.value) return;
+  const sessionCurrent = session.capture();
+  const version = ++queryVersion;
+  const requestedDataset = datasetId.value;
+  const modelVersion = modelVersions.capture(requestedDataset);
+  pendingQueryDataset = requestedDataset;
+  const current = () => sessionCurrent() && queryVersion === version;
+  const valid = () =>
+    current() && modelVersions.matches(requestedDataset, modelVersion);
   querying.value = true;
   activeRun.value = null;
   await handle(async () => {
@@ -336,13 +424,35 @@ async function ask() {
       method: "POST",
       body: json({
         question: question.value.trim(),
-        datasetId: datasetId.value,
+        datasetId: requestedDataset,
         mode: mode.value,
       }),
     });
-    if (current()) activeRun.value = value;
-  });
-  if (current()) querying.value = false;
+    if (!current()) return;
+    const initial = new Map<string, number>();
+    if (modelVersion !== undefined) initial.set(requestedDataset, modelVersion);
+    const reconciled = await reconcileRunModels(
+      [value],
+      initial,
+      current,
+      version,
+    );
+    if (
+      current() &&
+      value.datasetId === requestedDataset &&
+      modelVersions.matches(
+        requestedDataset,
+        reconciled.get(requestedDataset),
+      ) &&
+      runMatchesDataset(value, datasetForRun(value))
+    )
+      activeRun.value = value;
+    else if (current()) error.value = changedScopeMessage;
+  }, valid);
+  if (current()) {
+    querying.value = false;
+    pendingQueryDataset = "";
+  }
 }
 async function loadRuns(
   offset: number,
@@ -352,6 +462,7 @@ async function loadRuns(
 ) {
   const sessionCurrent = session.capture();
   const version = ++runLoadVersion;
+  const snapshot = modelVersions.snapshot();
   const current = () => sessionCurrent() && version === runLoadVersion;
   busy.value = true;
   detail.value = null;
@@ -361,7 +472,15 @@ async function loadRuns(
       `/runs/page?offset=${Math.max(0, offset)}&limit=${runPageSize}`,
     );
     if (!current()) return;
-    runs.value = value.items;
+    const reconciled = await reconcileRunModels(value.items, snapshot, current);
+    if (!current()) return;
+    runs.value = value.items.filter(
+      (run) =>
+        modelVersions.matches(run.datasetId, reconciled.get(run.datasetId)) &&
+        runMatchesDataset(run, datasetForRun(run)),
+    );
+    if (runs.value.length < value.items.length)
+      error.value = changedScopeMessage;
     runsOffset.value = offset;
     runsNextOffset.value = value.nextOffset;
     runPageOffsets.value = [...cursorStack];
@@ -386,12 +505,23 @@ async function loadNewerRuns() {
   await loadRuns(stack[stack.length - 1]!, stack);
 }
 async function showRun(id: string) {
-  const current = session.capture();
+  const sessionCurrent = session.capture();
+  const version = ++detailVersion;
+  const current = () => sessionCurrent() && detailVersion === version;
+  const snapshot = modelVersions.snapshot();
   busy.value = true;
   await handle(async () => {
     const value = await request<Run>(`/runs/${encodeURIComponent(id)}`);
-    if (current()) detail.value = value;
-  });
+    if (!current()) return;
+    const reconciled = await reconcileRunModels([value], snapshot, current);
+    if (
+      current() &&
+      modelVersions.matches(value.datasetId, reconciled.get(value.datasetId)) &&
+      runMatchesDataset(value, datasetForRun(value))
+    )
+      detail.value = value;
+    else if (current()) error.value = changedScopeMessage;
+  }, current);
   if (current()) busy.value = false;
 }
 async function createSource() {
@@ -435,6 +565,8 @@ async function testSource(source: Source) {
       message: result.message,
       type: result.success ? "success" : "error",
     });
+    const refreshed = await request<Source[]>("/sources");
+    if (current()) sources.value = refreshed;
   });
   if (current()) testing.value = "";
 }
@@ -481,7 +613,7 @@ async function saveDataset(body: Dataset) {
     if (!current()) return;
     const value = await request<Dataset[]>("/datasets");
     if (!current()) return;
-    datasets.value = value;
+    replaceDatasets(value);
     datasetDialog.value = false;
     ElMessage.success("语义模型已保存");
   } catch (e) {
@@ -670,7 +802,7 @@ onMounted(async () => {
             class="dot"
             :class="{ neutral: !system?.modelConfigured }"
           ></span
-          >{{ system?.modelConfigured ? "Agent 引擎已配置" : "演示模式可用" }}
+          >{{ system?.modelConfigured ? "Agent 引擎已配置" : "模型未配置" }}
         </div>
         <p>开源 · 可控 · 可追溯</p>
         <button class="user-button" @click="logout">
@@ -691,9 +823,7 @@ onMounted(async () => {
           <span class="version">{{
             system?.version ? "v" + system.version : "MateData"
           }}</span
-          ><el-tag effect="plain" type="info">{{
-            mode === "demo" ? "演示环境" : "Agent 模式"
-          }}</el-tag>
+          ><el-tag effect="plain" type="info">本地工作空间</el-tag>
         </div>
       </header>
       <main class="content">
@@ -739,7 +869,8 @@ onMounted(async () => {
                 v-model="mode"
                 :disabled="querying || !canExecute"
                 size="small"
-                ><el-radio-button value="demo">演示数据</el-radio-button
+                ><el-radio-button value="demo"
+                  >规则解析（无模型调用）</el-radio-button
                 ><el-radio-button
                   value="agent"
                   :disabled="!system?.modelConfigured"
@@ -753,7 +884,11 @@ onMounted(async () => {
               :rows="3"
               resize="none"
               maxlength="2000"
-              placeholder="例如：各区域销售额是多少？"
+              :placeholder="
+                examples[0]?.question
+                  ? `例如：${examples[0].question}`
+                  : '输入当前数据集中的业务问题'
+              "
               aria-label="输入业务问题"
               :disabled="querying || !canExecute"
               @keydown.ctrl.enter.prevent="ask"
@@ -763,9 +898,11 @@ onMounted(async () => {
               <span
                 ><span class="dot"></span
                 >{{
-                  mode === "demo"
-                    ? "使用内置示例数据，不代表真实业务"
-                    : "通过已配置模型查询所选数据集"
+                  selectedDataset?.sourceId === "demo_sales"
+                    ? "内置示例数据，不代表真实业务"
+                    : selectedDataset
+                      ? "查询当前语义模型连接的数据源"
+                      : "请先选择数据集"
                 }}
                 · ⌘ / Ctrl + Enter</span
               ><el-button
@@ -801,21 +938,24 @@ onMounted(async () => {
               <p>完成后将一并展示结果、SQL 与执行轨迹，请稍候。</p>
             </div>
           </div>
-          <RunResult v-if="activeRun" :run="activeRun" />
+          <RunResult
+            v-if="activeRun"
+            :run="activeRun"
+            :dataset="datasetForRun(activeRun)"
+          />
           <template v-if="!activeRun && !querying"
             ><div class="section-heading">
               <h2>从这些问题开始</h2>
-              <span>内置销售数据集示例</span>
+              <span
+                >{{ selectedDataset?.name || "当前模型" }} ·
+                根据可用指标与维度生成</span
+              >
             </div>
             <div class="example-grid">
               <button
                 v-for="example in examples"
                 :key="example.question"
-                @click="
-                  question = example.question;
-                  datasetId = 'sales';
-                  mode = 'demo';
-                "
+                @click="question = example.question"
               >
                 <span class="example-icon">{{ example.icon }}</span
                 ><small>{{ example.title }}</small
@@ -829,8 +969,10 @@ onMounted(async () => {
                 <h2>{{ selectedDataset?.name || "尚无可用数据集" }}</h2>
                 <p>
                   {{
-                    selectedDataset?.description ||
-                    "请先创建数据连接与语义模型。"
+                    selectedDataset
+                      ? selectedDataset.description ||
+                        "暂无业务说明，可在语义模型中补充。"
+                      : "请先创建数据连接与语义模型。"
                   }}
                 </p>
                 <button @click="navigate('datasets')">查看语义模型 ↗</button>
@@ -989,7 +1131,7 @@ onMounted(async () => {
             ><div v-if="detail">
               <el-button text type="primary" @click="detail = null"
                 >← 返回当前页</el-button
-              ><RunResult :run="detail" />
+              ><RunResult :run="detail" :dataset="datasetForRun(detail)" />
             </div>
             <section v-else class="table-card">
               <el-table
@@ -1004,7 +1146,7 @@ onMounted(async () => {
                 /><el-table-column label="模式" width="115"
                   ><template #default="scope"
                     ><el-tag type="info" effect="plain">{{
-                      scope.row.mode === "demo" ? "演示数据" : "Agent"
+                      scope.row.mode === "demo" ? "规则解析" : "Agent 查询"
                     }}</el-tag></template
                   ></el-table-column
                 ><el-table-column label="状态" width="110"
@@ -1113,7 +1255,9 @@ onMounted(async () => {
               </div>
               <div class="evaluation-actions">
                 <el-select v-model="mode" aria-label="评测模式"
-                  ><el-option label="演示数据" value="demo" /><el-option
+                  ><el-option
+                    label="规则解析（无模型调用）"
+                    value="demo" /><el-option
                     label="Agent 查询"
                     value="agent"
                     :disabled="!system?.modelConfigured" /></el-select

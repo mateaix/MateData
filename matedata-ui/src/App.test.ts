@@ -426,3 +426,481 @@ it.each(["success", "failure"])(
     expect(vm.busy).toBe(false);
   },
 );
+it("labels deterministic queries independently of source and suggests only current model fields", async () => {
+  await start();
+  const vm = state();
+  vm.datasets = [
+    {
+      id: "external",
+      name: "实际销售",
+      description: "",
+      sourceId: "production",
+      tableName: "orders",
+      metrics: [
+        {
+          id: "revenue",
+          name: "销售额",
+          column: "amount",
+          aggregation: "SUM",
+          aliases: [],
+        },
+      ],
+      dimensions: [
+        { id: "region", name: "区域", column: "region", aliases: [] },
+      ],
+    },
+  ];
+  vm.datasetId = "external";
+  vm.mode = "demo";
+  await flushPromises();
+  expect(wrapper.find(".composer").text()).toContain("规则解析（无模型调用）");
+  expect(wrapper.find(".composer").text()).not.toContain("内置示例");
+  expect(wrapper.find(".topbar").text()).not.toContain("演示环境");
+  const suggestions = wrapper.findAll(".example-grid button");
+  expect(suggestions.length).toBeGreaterThan(0);
+  expect(wrapper.find(".example-grid").text()).not.toContain("利润");
+  expect(wrapper.find(".example-grid").text()).not.toContain("订单");
+  await suggestions[0]!.trigger("click");
+  expect(vm.datasetId).toBe("external");
+  expect(vm.question).toContain("销售额");
+});
+it.each(["edit", "remove", "scope"])(
+  "clears only affected cached results on a %s model refresh",
+  async (change) => {
+    await start();
+    const vm = state();
+    const a = {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [
+        {
+          id: "revenue",
+          name: "Revenue",
+          column: "amount",
+          aggregation: "SUM",
+          aliases: [],
+        },
+      ],
+      dimensions: [],
+    };
+    const b = { ...a, id: "b", name: "B" };
+    let remote = [a, b];
+    api.mockImplementation(async (path) =>
+      path === "/datasets" ? remote : path === "/system" ? {} : [],
+    );
+    await vm.loadBase();
+    const run = {
+      id: "old-a",
+      datasetId: "a",
+      columns: [],
+      rows: [],
+      steps: [],
+      question: "old",
+      status: "SUCCEEDED",
+      mode: "demo",
+    };
+    vm.activeRun = run;
+    vm.detail = run;
+    vm.runs = [run, { ...run, id: "keep-b", datasetId: "b" }];
+    await vm.loadBase();
+    expect(vm.activeRun.id).toBe("old-a");
+    expect(vm.runs).toHaveLength(2);
+    remote =
+      change === "remove"
+        ? [b]
+        : [
+            {
+              ...a,
+              ...(change === "scope"
+                ? { metrics: [] }
+                : { name: "New A", sourceId: "changed_source" }),
+            },
+            b,
+          ];
+    await vm.loadBase();
+    expect(vm.activeRun).toBeNull();
+    expect(vm.detail).toBeNull();
+    expect(vm.runs.map((item: any) => item.id)).toEqual(["keep-b"]);
+  },
+);
+it.each(["ask", "detail"])(
+  "does not restore a deferred %s result after its model changes",
+  async (kind) => {
+    await start();
+    const vm = state();
+    let remote = {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [],
+      dimensions: [],
+    };
+    let resolve!: (value: unknown) => void;
+    api.mockImplementation(async (path) =>
+      path === "/datasets"
+        ? [remote]
+        : path === "/system"
+          ? {}
+          : await new Promise((r) => {
+              resolve = r;
+            }),
+    );
+    await vm.loadBase();
+    vm.datasetId = "a";
+    vm.question = "old question";
+    const pending = kind === "ask" ? vm.ask() : vm.showRun("old");
+    remote = { ...remote, name: "Changed" };
+    await vm.loadBase();
+    resolve({
+      id: "old",
+      datasetId: "a",
+      columns: [],
+      rows: [],
+      steps: [],
+      question: "old",
+      status: "SUCCEEDED",
+      mode: "demo",
+    });
+    await pending;
+    expect(vm.activeRun).toBeNull();
+    expect(vm.detail).toBeNull();
+  },
+);
+it("does not tell users to create a model when the selected model merely has no description", async () => {
+  await start();
+  const vm = state();
+  vm.datasets = [
+    {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [],
+      dimensions: [],
+    },
+  ];
+  vm.datasetId = "a";
+  await flushPromises();
+  expect(wrapper.find(".dataset-summary").text()).not.toContain("请先创建");
+  expect(wrapper.find(".dataset-summary").text()).toContain("暂无业务说明");
+});
+it("refreshes source status after a successful connectivity check", async () => {
+  await start();
+  const vm = state();
+  vm.sources = [{ id: "one", name: "One", status: "UNTESTED" }];
+  api.mockImplementation(async (path) =>
+    path === "/sources/one/test"
+      ? { success: true, message: "Connected" }
+      : [{ id: "one", name: "One", status: "CONNECTED" }],
+  );
+  await vm.testSource(vm.sources[0]);
+  expect(vm.sources[0].status).toBe("CONNECTED");
+});
+it.each(["navigate", "save"])(
+  "invalidates cached runs when the model changes through %s",
+  async (path) => {
+    await start();
+    const vm = state();
+    const model = {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [
+        {
+          id: "revenue",
+          name: "Revenue",
+          column: "amount",
+          aggregation: "SUM",
+          aliases: [],
+        },
+      ],
+      dimensions: [],
+    };
+    let remote = model;
+    api.mockImplementation(async (url) =>
+      url === "/datasets" ? [remote] : url === "/system" ? {} : [],
+    );
+    await vm.loadBase();
+    const run = {
+      id: "old",
+      datasetId: "a",
+      columns: [],
+      rows: [],
+      steps: [],
+      question: "old",
+      status: "SUCCEEDED",
+      mode: "demo",
+    };
+    vm.activeRun = run;
+    vm.runs = [run];
+    remote = {
+      ...model,
+      metrics: [{ ...model.metrics[0], name: "Renamed metric" }],
+    };
+    if (path === "navigate") await vm.navigate("datasets");
+    else {
+      vm.editDataset(model);
+      await vm.saveDataset(remote);
+    }
+    expect(vm.activeRun).toBeNull();
+    expect(vm.runs).toEqual([]);
+  },
+);
+it("retains a pending response after an unchanged model refresh", async () => {
+  await start();
+  const vm = state();
+  const model = {
+    id: "a",
+    name: "A",
+    description: "",
+    sourceId: "source",
+    tableName: "orders",
+    metrics: [],
+    dimensions: [],
+  };
+  let resolve!: (value: unknown) => void;
+  api.mockImplementation(async (path) =>
+    path === "/datasets"
+      ? [model]
+      : path === "/system"
+        ? {}
+        : await new Promise((r) => {
+            resolve = r;
+          }),
+  );
+  await vm.loadBase();
+  vm.question = "question";
+  vm.datasetId = "a";
+  const pending = vm.ask();
+  await vm.loadBase();
+  resolve({
+    id: "fresh",
+    datasetId: "a",
+    columns: [],
+    rows: [],
+    steps: [],
+    question: "question",
+    status: "SUCCEEDED",
+    mode: "demo",
+  });
+  await pending;
+  expect(vm.activeRun.id).toBe("fresh");
+});
+it("does not refill invalidated list items from an older page response", async () => {
+  await start();
+  const vm = state();
+  let model = {
+    id: "a",
+    name: "A",
+    description: "",
+    sourceId: "source",
+    tableName: "orders",
+    metrics: [],
+    dimensions: [],
+  };
+  let resolve!: (value: unknown) => void;
+  api.mockImplementation(async (path) =>
+    path === "/datasets"
+      ? [model]
+      : path === "/system"
+        ? {}
+        : await new Promise((r) => {
+            resolve = r;
+          }),
+  );
+  await vm.loadBase();
+  const pending = vm.loadRuns(0);
+  model = { ...model, name: "New A" };
+  await vm.loadBase();
+  resolve({ items: [{ id: "old", datasetId: "a" }], nextOffset: 50 });
+  await pending;
+  expect(vm.runs).toEqual([]);
+  expect(vm.hasOlderRuns).toBe(true);
+});
+it("invalidates cached results when only the authorization fingerprint changes", async () => {
+  await start();
+  const vm = state();
+  let model = {
+    id: "a",
+    name: "A",
+    description: "",
+    sourceId: "source",
+    tableName: "orders",
+    metrics: [],
+    dimensions: [],
+    scopeFingerprint: "scope-one",
+  };
+  api.mockImplementation(async (path) =>
+    path === "/datasets" ? [model] : path === "/system" ? {} : [],
+  );
+  await vm.loadBase();
+  vm.activeRun = {
+    id: "old",
+    datasetId: "a",
+    scopeFingerprint: "scope-one",
+    columns: [],
+    rows: [],
+    steps: [],
+    question: "old",
+    status: "SUCCEEDED",
+    mode: "demo",
+  };
+  vm.runs = [vm.activeRun];
+  model = { ...model, scopeFingerprint: "scope-two" };
+  await vm.loadBase();
+  expect(vm.activeRun).toBeNull();
+  expect(vm.runs).toEqual([]);
+});
+it.each(["ask", "detail", "history"])(
+  "rejects %s results carrying a different authorization fingerprint",
+  async (kind) => {
+    await start();
+    const vm = state();
+    const model = {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [],
+      dimensions: [],
+      scopeFingerprint: "current",
+    };
+    api.mockImplementation(async (path) =>
+      path === "/datasets"
+        ? [model]
+        : path === "/system"
+          ? {}
+          : {
+              id: "old",
+              datasetId: "a",
+              scopeFingerprint: "obsolete",
+              columns: [],
+              rows: [],
+              steps: [],
+              question: "old",
+              status: "SUCCEEDED",
+              mode: "demo",
+            },
+    );
+    await vm.loadBase();
+    vm.datasetId = "a";
+    vm.question = "question";
+    if (kind === "ask") await vm.ask();
+    else if (kind === "detail") await vm.showRun("old");
+    else {
+      const delegate = api.getMockImplementation()!;
+      api.mockImplementation(async (path, init) =>
+        path.startsWith("/runs/page")
+          ? { items: [await delegate("/runs/old", init)], nextOffset: null }
+          : delegate(path, init),
+      );
+      await vm.loadRuns(0);
+    }
+    expect(vm.activeRun).toBeNull();
+    expect(vm.detail).toBeNull();
+    expect(vm.runs).toEqual([]);
+    expect(vm.error).toContain("模型或权限已更新");
+  },
+);
+it.each(["ask", "detail", "history"])(
+  "refreshes stale metadata and safely displays a current %s response without rerunning the query",
+  async (kind) => {
+    await start();
+    const vm = state();
+    let model = {
+      id: "a",
+      name: "A",
+      description: "",
+      sourceId: "source",
+      tableName: "orders",
+      metrics: [],
+      dimensions: [],
+      scopeFingerprint: "old",
+    };
+    const run = {
+      id: "fresh",
+      datasetId: "a",
+      scopeFingerprint: "new",
+      columns: [],
+      rows: [],
+      steps: [],
+      question: "question",
+      status: "SUCCEEDED",
+      mode: "demo",
+    };
+    api.mockImplementation(async (path) =>
+      path === "/datasets"
+        ? [model]
+        : path === "/system"
+          ? {}
+          : path.startsWith("/runs/page")
+            ? { items: [run], nextOffset: null }
+            : run,
+    );
+    await vm.loadBase();
+    model = { ...model, name: "New A", scopeFingerprint: "new" };
+    vm.datasetId = "a";
+    vm.question = "question";
+    if (kind === "ask") await vm.ask();
+    else if (kind === "detail") await vm.showRun("fresh");
+    else await vm.loadRuns(0);
+    expect(vm.datasets[0].scopeFingerprint).toBe("new");
+    if (kind === "ask") expect(vm.activeRun.id).toBe("fresh");
+    else if (kind === "detail") expect(vm.detail.id).toBe("fresh");
+    else expect(vm.runs[0].id).toBe("fresh");
+    expect(api.mock.calls.filter(([path]) => path === "/queries")).toHaveLength(
+      kind === "ask" ? 1 : 0,
+    );
+  },
+);
+it("does not let a late recovery catalog override a newer model publication", async () => {
+  await start();
+  const vm = state();
+  const base = {
+    id: "a",
+    name: "A",
+    description: "",
+    sourceId: "source",
+    tableName: "orders",
+    metrics: [],
+    dimensions: [],
+    scopeFingerprint: "old",
+  };
+  api.mockImplementation(async (path) => (path === "/datasets" ? [base] : {}));
+  await vm.loadBase();
+  let resolve!: (value: unknown) => void;
+  api.mockImplementation(async (path) =>
+    path === "/queries"
+      ? {
+          id: "fresh",
+          datasetId: "a",
+          scopeFingerprint: "new",
+          columns: [],
+          rows: [],
+          steps: [],
+          question: "question",
+          status: "SUCCEEDED",
+          mode: "demo",
+        }
+      : await new Promise((r) => {
+          resolve = r;
+        }),
+  );
+  vm.question = "question";
+  const pending = vm.ask();
+  await flushPromises();
+  vm.replaceDatasets([{ ...base, scopeFingerprint: "newer" }]);
+  resolve([{ ...base, scopeFingerprint: "new" }]);
+  await pending;
+  expect(vm.datasets[0].scopeFingerprint).toBe("newer");
+  expect(vm.activeRun).toBeNull();
+});

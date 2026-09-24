@@ -15,32 +15,42 @@ public class SemanticController {
   private final SemanticService service;
   private final AuditService audit;
   private final DataAccessService access;
+  private final io.matedata.identity.ScopeTokenEncoder scopeTokens;
 
-  public SemanticController(SemanticService service, AuditService audit, DataAccessService access) {
+  public SemanticController(
+      SemanticService service,
+      AuditService audit,
+      DataAccessService access,
+      io.matedata.identity.ScopeTokenEncoder scopeTokens) {
     this.service = service;
     this.audit = audit;
     this.access = access;
+    this.scopeTokens = scopeTokens;
   }
 
   @GetMapping
-  public List<SemanticModel> list(HttpServletRequest request) {
-    return access.visible(Access.user(request).username());
+  public List<DatasetView> list(HttpServletRequest request) {
+    return access.visibleScopes(Access.user(request).username()).stream()
+        .map(
+            scoped ->
+                DatasetView.from(scoped, scopeTokens.encodeFingerprint(scoped.scopeFingerprint())))
+        .toList();
   }
 
   @PostMapping
   public SemanticModel create(@RequestBody SemanticModel model, HttpServletRequest request) {
     var u = Access.admin(request);
-    service.create(model);
+    var published = service.create(model);
     audit.record(u.username(), "DATASET_CREATE", model.id());
-    return model;
+    return published;
   }
 
   @PutMapping("/{id}")
   public SemanticModel update(
       @PathVariable String id, @RequestBody SemanticModel model, HttpServletRequest request) {
     var u = Access.admin(request);
-    service.update(id, model);
+    var published = service.update(id, model);
     audit.record(u.username(), "DATASET_UPDATE", id);
-    return model;
+    return published;
   }
 }

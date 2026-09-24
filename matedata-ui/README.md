@@ -23,11 +23,11 @@ TypeScript 7.0.2 is installed as the primary compiler. Current `vue-tsc` 3.3.11 
 
 ## Workbench
 
-- Login and session restoration; explicit demo/Agent mode selection.
+- Login and session restoration; explicit rule-based/Agent planning selection.
 - Questions, dataset context, result bars and table, SQL, execution trace, and errors.
 - Data connections: create, test, inspect tables. Update/delete are not exposed by API v1.
 - Semantic models: metadata-backed source/table/column selection, editable metric and dimension rows, alias and identifier validation, and preservation of published optional fields.
 - Query history/detail uses `/runs/page?offset=0&limit=50` and the server’s explicit `nextOffset`; a cursor stack supports previous pages even when authorization filtering produces short or empty pages.
 - Evaluation runs/results, model settings.
 
-Agent mode is disabled until the backend reports a configured model. Demo data is labeled and never represented as real business results. Requests remain pending until the synchronous backend operation returns; no simulated token streams or fake results are shown.
+Agent mode is disabled until the backend reports a configured model. Only the built-in `demo_sales` source is labeled as sample data. The API mode `demo` is shown as rule-based planning without a model call, and may query connected business data. Requests remain pending until the synchronous backend operation returns; no simulated token streams or fake results are shown.

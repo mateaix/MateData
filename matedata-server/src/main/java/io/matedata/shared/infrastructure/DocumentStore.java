@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -55,6 +56,20 @@ public class DocumentStore {
         namespace,
         id,
         write(value));
+  }
+
+  /** Inserts a new document without changing an existing document with the same key. */
+  public <T> boolean insertIfAbsent(String namespace, String id, T value) {
+    try {
+      jdbc.update(
+          "INSERT INTO md_document(namespace,id,payload,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
+          namespace,
+          id,
+          write(value));
+      return true;
+    } catch (DuplicateKeyException e) {
+      return false;
+    }
   }
 
   public void delete(String namespace, String id) {

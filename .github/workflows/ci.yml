@@ -30,3 +30,5 @@ jobs:
           grep -q '^BOOT-INF/classes/static/assets/.*\.js$' /tmp/matedata-jar-entries
           unzip -p matedata-server/target/matedata-server-0.1.0-SNAPSHOT.jar META-INF/MANIFEST.MF > /tmp/matedata-manifest
           grep -q '^Main-Class: org.springframework.boot.loader.launch.JarLauncher' /tmp/matedata-manifest
+      - name: Smoke test packaged application, restart and backup restore
+        run: python3 scripts/smoke.py

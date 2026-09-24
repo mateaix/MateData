@@ -1,9 +1,21 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { chartUnavailableReason, isNumericCell } from "../chart";
-import type { Run } from "../types";
-const props = defineProps<{ run: Run }>();
+import { runMatchesDataset } from "../modelVersions";
+import type { Run, Dataset } from "../types";
+const props = defineProps<{ run: Run; dataset?: Dataset }>();
 const tab = ref("result");
+const matchingDataset = computed(() =>
+  runMatchesDataset(props.run, props.dataset) ? props.dataset : undefined,
+);
+function columnName(id: string) {
+  return (
+    [
+      ...(matchingDataset.value?.metrics || []),
+      ...(matchingDataset.value?.dimensions || []),
+    ].find((field) => field.id === id)?.name || id
+  );
+}
 const numericColumn = computed(() =>
   props.run.columns.find((c) =>
     props.run.rows.some((r) => isNumericCell(r[c])),
@@ -44,7 +56,13 @@ function format(value: unknown) {
       }}</el-tag>
     </div>
     <div class="run-meta">
-      <span>{{ run.mode === "demo" ? "内置演示数据" : "Agent 实时查询" }}</span
+      <span>{{
+        run.mode === "demo" ? "规则解析（无模型调用）" : "Agent 查询"
+      }}</span
+      ><span v-if="matchingDataset?.sourceId === 'demo_sales'"
+        >内置示例数据</span
+      ><span v-else-if="matchingDataset"
+        >{{ matchingDataset.name }} · 已连接数据源</span
       ><span>{{ run.rowCount }} 条结果</span><span>{{ run.durationMs }} ms</span
       ><span>{{ run.id }}</span>
     </div>
@@ -70,7 +88,7 @@ function format(value: unknown) {
           class="chart"
         >
           <div class="chart-title">
-            {{ numericColumn }}
+            {{ columnName(numericColumn) }}
             <span>按返回顺序 · 最多展示 12 项 · 条形长度为近似值</span>
           </div>
           <div v-for="(row, index) in chartRows" :key="index" class="bar-row">
@@ -95,7 +113,7 @@ function format(value: unknown) {
             v-for="column in run.columns"
             :key="column"
             :prop="column"
-            :label="column"
+            :label="columnName(column)"
             min-width="140"
             ><template #default="scope">{{
               format(scope.row[column])

@@ -101,7 +101,10 @@ public class QueryService {
       verifyScope(user, datasetId, fingerprint);
       steps.add(
           new QueryRun.Step(
-              active, "SUCCEEDED", "返回 " + result.rows().size() + " 行；查询超时 10 秒", elapsed(t)));
+              active,
+              "SUCCEEDED",
+              "返回 " + result.rows().size() + " 行；语句执行超时 10 秒；分批读取",
+              elapsed(t)));
       String answer =
           "已基于「"
               + model.name()

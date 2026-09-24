@@ -89,7 +89,7 @@ class AccuracyRegressionTest {
   void demoNameDoesNotGrantAccessToRepointedProductionData() {
     var store = store();
     var accounts = new JdbcAccountRepository(store);
-    accounts.save(new Account("analyst", "Analyst", "ANALYST", "unused"));
+    accounts.createIfAbsent(new Account("analyst", "Analyst", "ANALYST", "unused"));
     var policy =
         new DataAccessService(
             accounts, new JdbcGrantRepository(store), new JdbcModelRepository(store));

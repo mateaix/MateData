@@ -34,6 +34,11 @@ public record SemanticModel(
     identifier(sourceId);
     identifier(tableName);
     if (name == null || name.isBlank()) throw new IllegalArgumentException("数据集名称不能为空");
+    if (metrics == null
+        || dimensions == null
+        || metrics.stream().anyMatch(java.util.Objects::isNull)
+        || dimensions.stream().anyMatch(java.util.Objects::isNull))
+      throw new IllegalArgumentException("指标和维度列表不能为空值");
     metrics = List.copyOf(metrics);
     dimensions = List.copyOf(dimensions);
     if (metrics.isEmpty()) throw new IllegalArgumentException("至少需要一个指标");
@@ -47,9 +52,10 @@ public record SemanticModel(
     public Metric {
       identifier(id);
       identifier(column);
-      if (!Set.of("SUM", "COUNT", "AVG", "MIN", "MAX").contains(aggregation))
+      businessName(name);
+      if (aggregation == null || !Set.of("SUM", "COUNT", "AVG", "MIN", "MAX").contains(aggregation))
         throw new IllegalArgumentException("不支持的聚合函数");
-      aliases = List.copyOf(aliases == null ? List.of() : aliases);
+      aliases = vocabulary(aliases);
     }
   }
 
@@ -62,9 +68,20 @@ public record SemanticModel(
     public Dimension {
       identifier(id);
       identifier(column);
-      aliases = List.copyOf(aliases == null ? List.of() : aliases);
+      businessName(name);
+      aliases = vocabulary(aliases);
       valueType = valueType == null ? ValueType.TEXT : valueType;
     }
+  }
+
+  private static void businessName(String name) {
+    if (name == null || name.isBlank()) throw new IllegalArgumentException("业务名称与别名不能为空");
+  }
+
+  private static List<String> vocabulary(List<String> aliases) {
+    if (aliases == null) return List.of();
+    aliases.forEach(SemanticModel::businessName);
+    return List.copyOf(aliases);
   }
 
   public static void identifier(String value) {

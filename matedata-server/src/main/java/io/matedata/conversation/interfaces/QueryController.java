@@ -13,10 +13,15 @@ import org.springframework.web.bind.annotation.*;
 public class QueryController {
   private final QueryService queries;
   private final AuditService audit;
+  private final io.matedata.identity.ScopeTokenEncoder scopeTokens;
 
-  public QueryController(QueryService queries, AuditService audit) {
+  public QueryController(
+      QueryService queries,
+      AuditService audit,
+      io.matedata.identity.ScopeTokenEncoder scopeTokens) {
     this.queries = queries;
     this.audit = audit;
+    this.scopeTokens = scopeTokens;
   }
 
   public record Ask(String question, String datasetId, String mode, String conversationId) {}
@@ -28,7 +33,7 @@ public class QueryController {
         queries.ask(
             u.username(), ask.question(), ask.datasetId(), ask.mode(), ask.conversationId());
     audit.record(u.username(), "QUERY_" + run.status(), run.id());
-    return RunResponses.safeNumbers(run);
+    return response(run);
   }
 
   @GetMapping("/runs")
@@ -36,7 +41,9 @@ public class QueryController {
       @RequestParam(defaultValue = "0") int offset,
       @RequestParam(defaultValue = "50") int limit,
       HttpServletRequest request) {
-    return queries.history(Access.user(request).username(), offset, limit);
+    return queries.history(Access.user(request).username(), offset, limit).stream()
+        .map(this::response)
+        .toList();
   }
 
   @GetMapping("/runs/page")
@@ -44,11 +51,17 @@ public class QueryController {
       @RequestParam(defaultValue = "0") int offset,
       @RequestParam(defaultValue = "50") int limit,
       HttpServletRequest request) {
-    return queries.historyPage(Access.user(request).username(), offset, limit);
+    var page = queries.historyPage(Access.user(request).username(), offset, limit);
+    return new RunPage(page.items().stream().map(this::response).toList(), page.nextOffset());
   }
 
   @GetMapping("/runs/{id}")
   public QueryRun get(@PathVariable String id, HttpServletRequest request) {
-    return RunResponses.safeNumbers(queries.get(Access.user(request).username(), id));
+    return response(queries.get(Access.user(request).username(), id));
+  }
+
+  private QueryRun response(QueryRun run) {
+    return RunResponses.safeNumbers(run)
+        .withScope(scopeTokens.encodeFingerprint(run.scopeFingerprint()));
   }
 }

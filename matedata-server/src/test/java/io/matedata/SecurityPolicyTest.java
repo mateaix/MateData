@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.*;
 
 import io.matedata.catalog.domain.ConnectionPolicy;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SecurityPolicyTest {
   @Test
@@ -29,5 +31,30 @@ class SecurityPolicyTest {
         })
       assertThatThrownBy(() -> ConnectionPolicy.validate("MYSQL", url))
           .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "mysql",
+        "information_schema",
+        "performance_schema",
+        "sys",
+        "MySQL",
+        "INFORMATION_SCHEMA"
+      })
+  void rejectsMysqlSystemCatalogs(String catalog) {
+    assertThatThrownBy(() -> ConnectionPolicy.validate("MYSQL", "jdbc:mysql://db:3306/" + catalog))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("系统");
+  }
+
+  @Test
+  void allowsOrdinaryDatabaseNamesIncludingPostgres() {
+    assertThatCode(
+            () -> ConnectionPolicy.validate("POSTGRESQL", "jdbc:postgresql://db:5432/postgres"))
+        .doesNotThrowAnyException();
+    assertThatCode(() -> ConnectionPolicy.validate("MYSQL", "jdbc:mysql://db:3306/mysql_analytics"))
+        .doesNotThrowAnyException();
   }
 }

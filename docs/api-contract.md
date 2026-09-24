@@ -1,16 +1,16 @@
 # API contract v1
 
-Base `/api/v1`, JSON, same-origin session cookie, error `{code,message,requestId}`. Lists are plain arrays. Unknown / unavailable operations produce errors, never fake success.
+Base `/api/v1`, JSON, same-origin session cookie, error `{code,message,requestId}`. Lists are plain arrays except explicitly documented paged endpoints. Unknown / unavailable operations produce errors, never fake success.
 
 - `POST /auth/login` `{username,password}` → `{username,displayName,role}`; `GET /auth/me`; `POST /auth/logout`.
 - `GET /system` → `{name,version,javaVersion,agentScopeVersion,mode,modelConfigured}`.
-- `GET /datasets` → array `{id,name,description,sourceId,tableName,metrics:[{id,name,column,aggregation,aliases:string[]}],dimensions:[{id,name,column,aliases:string[],valueType?:string}]}`.
+- `GET /datasets` → array `{id,name,description,sourceId,tableName,dialect,scopeFingerprint,metrics:[{id,name,column,aggregation,aliases:string[]}],dimensions:[{id,name,column,aliases:string[],valueType?:string}]}`.
 - `POST /datasets` same dataset body, admin; `PUT /datasets/{id}` same body.
 - `GET /sources` → array `{id,name,type,jdbcUrl,username,status,createdAt}` (never password).
 - `POST /sources` `{name,type,jdbcUrl,username,password}` → source, admin. Types POSTGRESQL/MYSQL; built-in DEMO is read-only.
 - `POST /sources/{id}/test` → `{success,message}`; `GET /sources/{id}/tables` → array `{name,columns:[{name,type}]}`.
 - `POST /queries` `{question,datasetId,mode:'demo'|'agent',conversationId?:string}` → run. Synchronous, display pending state. No simulated streaming.
-- Run shape `{id,conversationId,question,datasetId,mode,status:'SUCCEEDED'|'FAILED',sql,columns:string[],rows:object[],rowCount,durationMs,createdAt,answer,error:string|null,steps:[{name,status,detail,durationMs}]}`.
+- Run shape `{id,conversationId,question,datasetId,scopeFingerprint,mode,status:'SUCCEEDED'|'FAILED',sql,columns:string[],rows:object[],rowCount,durationMs,createdAt,answer,error:string|null,steps:[{name,status,detail,durationMs}]}`.
 - `GET /runs/page?offset=0&limit=50` → `{items:Run[],nextOffset:number|null}`. Use the returned continuation even when the visible page is empty: revoked records can occupy the scanned page. Never infer continuation from visible item count.
 - `GET /runs?offset=0&limit=50` → authorized own run summaries, newest first (max 100 per page); summaries have empty rows/SQL/steps and retain rowCount. `GET /runs/{id}` → full own run. Results become inaccessible when data authorization or semantic model changes; rerun the question.
 - Decimal and arbitrary-size integer result cells are serialized as exact decimal strings so browsers do not round financial values. Ordinary safe integral cells remain numbers.
@@ -29,4 +29,10 @@ Local starter account is provided via env `MATEDATA_ADMIN_PASSWORD`; startup gen
 
 API mutations require `X-MateData-Request: 1` (CSRF guard); all requests should set this header. CORS not broadly enabled. Dev proxy `/api` → `http://127.0.0.1:8090`.
 
+Mutation bodies are limited to 256 KiB, including chunked transfer; larger bodies return `413 PAYLOAD_TOO_LARGE`. Concurrent creation of the same username or dataset identifier permits only one success and returns `409 CONFLICT` for the other, without overwriting the winning credentials or published model. Explicit dataset updates retain their update semantics.
+
+`scopeFingerprint` is an opaque 64-character keyed HMAC token covering the full semantic model and the current user's authorization. A purpose-specific signing key is derived from the persistent server secret, so clients cannot enumerate low-entropy hidden row-filter values from a public plain hash. Compare it with the result's fingerprint before attaching business labels or a source description. Clear cached results when the corresponding dataset or fingerprint changes, including changes to row filters that leave visible fields unchanged. This is a cache-consistency token, never an authorization credential; every server history read still checks current permissions.
+
 Published dimension `valueType` is inferred from database metadata (TEXT/NUMBER/BOOLEAN/DATE/TIME/TIMESTAMP/TIMESTAMP_WITH_ZONE), not trusted from incoming definitions. Filter values are strings at the planning boundary and are parsed into exact typed JDBC values; temporal input uses ISO notation. Temporal result cells are ISO strings, preserving fractional time precision.
+
+Publishing SUM/AVG metrics requires a numeric physical column. Metric/dimension names and supplied aliases cannot be null or blank. Successful create/update responses contain the canonical physical table/column names and dialect; refresh GET `/datasets` to obtain the current scope fingerprint.

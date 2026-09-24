@@ -7,5 +7,8 @@ public interface ModelRepository {
 
   List<SemanticModel> all();
 
+  /** Atomically creates a model; returns false if the identifier already exists. */
+  boolean createIfAbsent(SemanticModel model);
+
   void save(SemanticModel model);
 }

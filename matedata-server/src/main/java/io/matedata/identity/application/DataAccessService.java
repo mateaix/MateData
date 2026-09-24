@@ -52,10 +52,18 @@ public class DataAccessService {
   }
 
   public List<SemanticModel> visible(String user) {
-    var visible = new ArrayList<SemanticModel>();
+    return visibleScopes(user).stream().map(ScopedModel::model).toList();
+  }
+
+  public record ScopedModel(SemanticModel model, String scopeFingerprint) {}
+
+  public List<ScopedModel> visibleScopes(String user) {
+    var visible = new ArrayList<ScopedModel>();
     for (var model : models.all())
       try {
-        visible.add(restrict(model, require(user, model)));
+        var grant = require(user, model);
+        visible.add(
+            new ScopedModel(restrict(model, grant), AuthorizationFingerprint.of(model, grant)));
       } catch (ApplicationException ignored) {
       }
     return visible;

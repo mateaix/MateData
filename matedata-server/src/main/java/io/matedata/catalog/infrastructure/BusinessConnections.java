@@ -7,6 +7,7 @@ import io.matedata.shared.infrastructure.SecretVault;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Properties;
 import org.springframework.stereotype.Component;
 
@@ -20,6 +21,7 @@ public class BusinessConnections implements io.matedata.catalog.domain.SourceCon
   }
 
   public Connection open(DataSourceDefinition source) throws SQLException {
+    if (!source.type().equals("DEMO")) ConnectionPolicy.validate(source.type(), source.jdbcUrl());
     var p = new Properties();
     p.setProperty("user", source.username());
     p.setProperty(
@@ -34,10 +36,45 @@ public class BusinessConnections implements io.matedata.catalog.domain.SourceCon
       p.setProperty("socketTimeout", "15000");
       p.setProperty("allowLoadLocalInfile", "false");
       p.setProperty("allowMultiQueries", "false");
+      // BOOLEAN is a TINYINT(1) alias and may contain values other than 0/1.
+      p.setProperty("tinyInt1isBit", "false");
     }
     var c = DriverManager.getConnection(source.jdbcUrl(), p);
-    c.setReadOnly(true);
-    return c;
+    try {
+      c.setReadOnly(true);
+      ConnectionPolicy.validateNamespace(source.type(), c.getCatalog(), c.getSchema());
+      return c;
+    } catch (SQLException | RuntimeException failure) {
+      try {
+        c.close();
+      } catch (SQLException closing) {
+        failure.addSuppressed(closing);
+      }
+      throw failure;
+    }
+  }
+
+  /** Check the server's unqualified lookup, including PostgreSQL's implicit pg_catalog path. */
+  public void verifyTableResolution(
+      Connection connection, DataSourceDefinition source, String table, boolean quoted)
+      throws SQLException {
+    if (!source.type().equals("POSTGRESQL")) return;
+    String schema = connection.getSchema();
+    ConnectionPolicy.validateNamespace(source.type(), connection.getCatalog(), schema);
+    try (var statement =
+        connection.prepareStatement(
+            "SELECT n.nspname, c.relkind FROM pg_catalog.pg_class c "
+                + "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                + "WHERE c.oid = pg_catalog.to_regclass(?)")) {
+      statement.setQueryTimeout(10);
+      statement.setString(1, quoted ? "\"" + table.replace("\"", "\"\"") + "\"" : table);
+      try (var rows = statement.executeQuery()) {
+        if (!rows.next()
+            || !schema.equals(rows.getString(1))
+            || !java.util.Set.of("r", "p").contains(rows.getString(2)))
+          throw new IllegalArgumentException("查询表未解析到当前业务 schema 的普通表，请刷新数据集配置");
+      }
+    }
   }
 
   @Override
@@ -57,6 +94,8 @@ public class BusinessConnections implements io.matedata.catalog.domain.SourceCon
       String schema = source.type().equals("DEMO") ? "PUBLIC" : c.getSchema();
       try (var r = meta.getTables(c.getCatalog(), schema, "%", new String[] {"TABLE"})) {
         while (r.next() && tables.size() < 100) {
+          if (!Objects.equals(c.getCatalog(), r.getString("TABLE_CAT"))
+              || !Objects.equals(schema, r.getString("TABLE_SCHEM"))) continue;
           String table = r.getString("TABLE_NAME");
           var columns = new ArrayList<SourceColumn>();
           String escape = meta.getSearchStringEscape();
@@ -69,7 +108,9 @@ public class BusinessConnections implements io.matedata.catalog.domain.SourceCon
                       .replace("%", escape + "%");
           try (var cr = meta.getColumns(c.getCatalog(), schema, pattern, "%")) {
             while (cr.next())
-              if (table.equals(cr.getString("TABLE_NAME")))
+              if (table.equals(cr.getString("TABLE_NAME"))
+                  && Objects.equals(c.getCatalog(), cr.getString("TABLE_CAT"))
+                  && Objects.equals(schema, cr.getString("TABLE_SCHEM")))
                 columns.add(
                     new SourceColumn(cr.getString("COLUMN_NAME"), cr.getString("TYPE_NAME")));
           }

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Verify the packaged application and durable state through HTTP, in isolated temporary data."""
 import http.cookiejar
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -49,14 +53,24 @@ def login(opener):
 
 
 with tempfile.TemporaryDirectory(prefix='matedata-smoke-') as temp:
-    data_dir = Path(temp)
+    data_dir = Path(temp) / 'original'
+    data_dir.mkdir()
     env = dict(os.environ, PORT=str(port), BIND_ADDRESS='127.0.0.1',
         MATEDATA_ADMIN_PASSWORD=password, MATEDATA_DATA_DIR=str(data_dir),
         MATEDATA_DATABASE_URL=f'jdbc:h2:file:{data_dir}/metadata;DB_CLOSE_ON_EXIT=FALSE',
         MATEDATA_DATABASE_PASSWORD='', MATEDATA_ENCRYPTION_KEY='', COOKIE_SECURE='false')
-    for phase in ('initial', 'restart'):
+    for phase in ('initial', 'restart', 'restored-backup'):
+        if phase == 'restored-backup':
+            # The previous process has stopped. Restore only the documented durable files.
+            restored_dir = Path(temp) / 'restored'
+            restored_dir.mkdir()
+            for name in ('metadata.mv.db', 'secret.key'):
+                shutil.copy2(data_dir / name, restored_dir / name)
+            data_dir = restored_dir
+            env.update(MATEDATA_DATA_DIR=str(data_dir),
+                MATEDATA_DATABASE_URL=f'jdbc:h2:file:{data_dir}/metadata;DB_CLOSE_ON_EXIT=FALSE')
         with (data_dir / f'{phase}.log').open('w') as log:
-            process = subprocess.Popen([str(ROOT / 'scripts/run.sh')], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(ROOT / 'scripts/run.sh')], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 deadline = time.monotonic() + 30
                 while True:
@@ -81,6 +95,27 @@ with tempfile.TemporaryDirectory(prefix='matedata-smoke-') as temp:
                     assert run['status'] == 'SUCCEEDED' and len(run['rows']) == 4
                     assert run['rows'][0] == {'region': '华东', 'revenue': '1449000.00'}
                     run_id = run['id']
+                    run_scope = run['scopeFingerprint']
+                    assert re.fullmatch('[a-f0-9]{64}', run_scope)
+                    # Authenticate sequentially within the login budget, then issue eight
+                    # real SQL queries together through independent session cookie jars.
+                    sessions = [client() for _ in range(8)]
+                    for session in sessions:
+                        login(session)
+                    arrival = threading.Barrier(8)
+                    def concurrent_query(session):
+                        arrival.wait(timeout=10)
+                        return request(session, '/api/v1/queries',
+                            {'question': '各区域销售额', 'datasetId': 'sales', 'mode': 'demo'})
+                    with ThreadPoolExecutor(max_workers=8) as workers:
+                        concurrent_runs = list(workers.map(concurrent_query, sessions))
+                    concurrent_ids = {item['id'] for item in concurrent_runs}
+                    assert len(concurrent_ids) == 8 and run_id not in concurrent_ids
+                    for item in concurrent_runs:
+                        assert item['status'] == 'SUCCEEDED' and len(item['rows']) == 4
+                        assert item['rows'][0]['revenue'] == '1449000.00'
+                    persisted = request(authenticated, '/api/v1/runs/page?limit=100')
+                    assert concurrent_ids.issubset({item['id'] for item in persisted['items']})
                     report = request(authenticated, '/api/v1/evaluations/run', {'mode': 'demo'})
                     assert report['passed'] == report['total'] == 4
                     report_id = report['id']
@@ -90,17 +125,23 @@ with tempfile.TemporaryDirectory(prefix='matedata-smoke-') as temp:
                 else:
                     restored = request(authenticated, '/api/v1/runs/' + run_id)
                     assert restored['rows'][0]['revenue'] == '1449000.00'
+                    assert restored['scopeFingerprint'] == run_scope
+                    for identifier in concurrent_ids:
+                        item = request(authenticated, '/api/v1/runs/' + identifier)
+                        assert item['status'] == 'SUCCEEDED' and item['rows'][0]['revenue'] == '1449000.00'
+                    datasets = request(authenticated, '/api/v1/datasets')
+                    assert next(d for d in datasets if d['id'] == 'sales')['scopeFingerprint'] == run_scope
                     assert request(authenticated, '/api/v1/evaluations/reports/' + report_id)['passed'] == 4
                     settings = request(authenticated, '/api/v1/settings/model')
                     assert settings['configured'] and settings['model'] == 'smoke-only'
                     assert model_key not in json.dumps(settings)
-                print(f'{phase}: bundled UI, auth, query/evaluation state and encrypted model configuration passed')
+                print(f'{phase}: bundled UI, auth, eight concurrent queries, durable query/evaluation state and encrypted model configuration passed')
             finally:
                 process.terminate()
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
     assert model_key.encode() not in (data_dir / 'metadata.mv.db').read_bytes()
 print('Packaged application smoke passed; temporary processes and data removed.')

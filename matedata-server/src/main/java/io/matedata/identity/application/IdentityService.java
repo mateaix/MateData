@@ -54,10 +54,8 @@ public class IdentityService {
         || password.length() < 12
         || password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72)
       throw new IllegalArgumentException("密码至少 12 字符且 UTF-8 编码不超过 72 字节");
-    if (repository.find(username).isPresent())
-      throw new ApplicationException(Kind.CONFLICT, "用户名已存在");
     var a = new Account(username, name, role, encoder.encode(password));
-    repository.save(a);
+    if (!repository.createIfAbsent(a)) throw new ApplicationException(Kind.CONFLICT, "用户名已存在");
     return publicView(a);
   }
 

@@ -17,8 +17,8 @@ public class JdbcAccountRepository implements AccountRepository {
     return store.get("identity", username, Account.class);
   }
 
-  public void save(Account account) {
-    store.save("identity", account.username(), account);
+  public boolean createIfAbsent(Account account) {
+    return store.insertIfAbsent("identity", account.username(), account);
   }
 
   public List<Account> all() {

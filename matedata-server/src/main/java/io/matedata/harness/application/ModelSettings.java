@@ -55,7 +55,8 @@ public class ModelSettings {
     } catch (Exception e) {
       throw new IllegalArgumentException("模型地址不合法");
     }
-    if (!java.util.Set.of("https", "http").contains(uri.getScheme())
+    if (uri.getScheme() == null
+        || !java.util.Set.of("https", "http").contains(uri.getScheme())
         || uri.getHost() == null
         || uri.getUserInfo() != null
         || uri.getQuery() != null

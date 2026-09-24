@@ -19,6 +19,7 @@ export interface Field {
   aliases: string[];
 }
 export interface Dataset {
+  scopeFingerprint?: string;
   id: string;
   name: string;
   description: string;
@@ -37,6 +38,7 @@ export interface Source {
   createdAt: string;
 }
 export interface Run {
+  scopeFingerprint?: string;
   id: string;
   conversationId: string;
   question: string;
