@@ -1,0 +1,34 @@
+server:
+  port: ${PORT:8090}
+  address: ${BIND_ADDRESS:127.0.0.1}
+  servlet:
+    session:
+      timeout: 8h
+      cookie:
+        http-only: true
+        same-site: strict
+        secure: ${COOKIE_SECURE:false}
+spring:
+  application:
+    name: matedata
+  datasource:
+    url: ${MATEDATA_DATABASE_URL:jdbc:h2:file:./data/matedata;DB_CLOSE_ON_EXIT=FALSE}
+    username: sa
+    password: ${MATEDATA_DATABASE_PASSWORD:}
+  threads:
+    virtual:
+      enabled: true
+  jackson:
+    default-property-inclusion: always
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+matedata:
+  data-dir: ${MATEDATA_DATA_DIR:./data}
+  admin-password: ${MATEDATA_ADMIN_PASSWORD:}
+  encryption-key: ${MATEDATA_ENCRYPTION_KEY:}
+logging:
+  level:
+    io.agentscope: WARN

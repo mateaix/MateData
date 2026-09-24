@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>4.1.1</version><relativePath/></parent>
+  <groupId>io.matedata</groupId><artifactId>matedata</artifactId><version>0.1.0-SNAPSHOT</version><packaging>pom</packaging>
+  <name>MateData</name><description>Open-source semantic analytics with governed agents</description>
+  <licenses><license><name>Apache License 2.0</name><url>https://www.apache.org/licenses/LICENSE-2.0</url></license></licenses>
+  <properties><java.version>25</java.version><maven.compiler.release>25</maven.compiler.release><agentscope.version>2.0.3</agentscope.version><jsqlparser.version>5.4</jsqlparser.version></properties>
+  <modules><module>matedata-domain</module><module>matedata-server</module></modules>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>io.matedata</groupId><artifactId>matedata-domain</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>com.github.jsqlparser</groupId><artifactId>jsqlparser</artifactId><version>${jsqlparser.version}</version></dependency>
+  </dependencies></dependencyManagement>
+</project>
