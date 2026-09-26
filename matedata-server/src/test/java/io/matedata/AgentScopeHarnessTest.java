@@ -175,6 +175,206 @@ class AgentScopeHarnessTest {
     }
   }
 
+  /** Scripted model: the given run_query arguments on the first call, then a text reply. */
+  FakeModelServer queryThen(Map<String, Object> arguments, String answer) throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE,
+            (request, call) ->
+                toolResultsThisTurn(request) == 0
+                    ? holder[0].toolCall("q", "run_query", arguments)
+                    : text(answer));
+    return holder[0];
+  }
+
+  static Map<String, Object> query(String dimension, String sort) {
+    var arguments = new LinkedHashMap<String, Object>();
+    arguments.put("metric", "revenue");
+    arguments.put("dimension", dimension);
+    arguments.put("filtersJson", "{}");
+    arguments.put("limit", 2);
+    if (sort != null) arguments.put("sort", sort);
+    return arguments;
+  }
+
+  @Test
+  void anExhaustedBudgetAfterTheQueryKeepsTheRowsAndNeverShowsFrameworkErrors() throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE,
+            (request, call) ->
+                call == 1
+                    ? holder[0].toolCall("q", "run_query", query("region", null))
+                    : holder[0].toolCall("m", "list_metrics", Map.of()));
+    try (var server = holder[0]) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 3, 15), dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      var steps = new CopyOnWriteArrayList<ExecutionStep>();
+      var reply =
+          agent.answer(
+              turn("销售额最高的两个区域", "exhausted"),
+              plan -> {
+                plans.add(plan);
+                return REGION_ROWS;
+              },
+              steps::add);
+      assertThat(reply.answer()).isEmpty();
+      assertThat(plans).hasSize(1);
+      assertThat(steps.getLast().status()).isEqualTo("SUCCEEDED");
+      assertThat(steps.getLast().detail()).contains("平台摘要");
+      assertThat(steps.toString()).doesNotContain("Maximum iterations");
+    }
+  }
+
+  @Test
+  void aTimeoutWhileInterpretingKeepsTheCompletedQuery() throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE,
+            (request, call) -> {
+              if (call == 1) return holder[0].toolCall("q", "run_query", query("region", null));
+              Thread.sleep(10_000);
+              return text("too late");
+            });
+    try (var server = holder[0]) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 5), dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      var reply =
+          org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+              java.time.Duration.ofSeconds(9),
+              () ->
+                  agent.answer(
+                      turn("各区域销售额", "slow-interpretation"),
+                      plan -> {
+                        plans.add(plan);
+                        return REGION_ROWS;
+                      },
+                      step -> {}));
+      assertThat(reply.answer()).isEmpty();
+      assertThat(plans).hasSize(1);
+    }
+  }
+
+  @Test
+  void lowestAndMostRecentQuestionsReachTheCompilerAsExplicitSorts() throws Exception {
+    try (var server = queryThen(query("region", "metric_asc"), "西部最低")) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      agent.answer(
+          turn("销售额最低的两个区域", "lowest"),
+          plan -> {
+            plans.add(plan);
+            return REGION_ROWS;
+          },
+          step -> {});
+      assertThat(plans)
+          .containsExactly(
+              new QueryPlan("revenue", "region", Map.of(), 2, QueryPlan.Sort.METRIC_ASC));
+      assertThat(server.requests.getFirst().toString()).contains("metric_asc", "dimension_desc");
+    }
+    try (var server = queryThen(query("region", "cheapest_first"), "无法回答")) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var reply =
+          agent.answer(
+              turn("销售额最低的两个区域", "invalid-sort"),
+              plan -> {
+                throw new AssertionError("an invalid sort must be rejected before data access");
+              },
+              step -> {});
+      assertThat(reply.answer()).isEqualTo("无法回答");
+      assertThat(server.requests.get(1).toString()).contains("查询被拒绝");
+    }
+  }
+
+  @Test
+  void rowScopedResultsTellTheModelWithoutRevealingTheFilter() throws Exception {
+    for (boolean scoped : List.of(true, false)) {
+      try (var server = queryThen(query("region", null), "华东销售额为 1449000.00")) {
+        var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+        agent.answer(
+            turn("各区域销售额", "scoped-" + scoped),
+            plan ->
+                new QueryAgent.Rows(
+                    List.of("region", "revenue"),
+                    List.of(Map.of("region", "华东", "revenue", new BigDecimal("1449000.00"))),
+                    scoped),
+            step -> {});
+        var toolResult = messages(server.requests.get(1), "tool").getLast().toString();
+        if (scoped) assertThat(toolResult).contains("数据权限", "不代表全量");
+        else assertThat(toolResult).doesNotContain("数据权限");
+      }
+    }
+  }
+
+  @Test
+  void onlyTheMostRecentQuestionsSendTheirToolResultsToTheModel() throws Exception {
+    try (var server = server(Protocol.OPENAI_COMPATIBLE)) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      for (int turn = 1; turn <= 3; turn++) {
+        String marker = "turn-" + turn + "-value";
+        int before = server.requests.size();
+        agent.answer(
+            turn("各区域销售额 " + turn, "trimmed"),
+            plan -> new QueryAgent.Rows(List.of("region"), List.of(Map.of("region", marker))),
+            step -> {});
+        if (turn == 3) {
+          String firstRequest = server.requests.get(before).toString();
+          assertThat(firstRequest).doesNotContain("turn-1-value").contains("turn-2-value");
+          assertThat(firstRequest).contains("较早轮次的工具结果已省略");
+          // Questions and answers from every earlier turn stay in context.
+          assertThat(firstRequest).contains("各区域销售额 1", "各区域销售额 2");
+        }
+      }
+    }
+  }
+
+  @Test
+  void trimmingReplacesOnlyOlderToolResults() {
+    var messages = new ArrayList<io.agentscope.core.message.Msg>();
+    for (int turn = 1; turn <= 3; turn++) {
+      messages.add(
+          io.agentscope.core.message.Msg.builder()
+              .role(io.agentscope.core.message.MsgRole.USER)
+              .textContent("q" + turn)
+              .build());
+      messages.add(
+          io.agentscope.core.message.Msg.builder()
+              .role(io.agentscope.core.message.MsgRole.TOOL)
+              .content(
+                  new io.agentscope.core.message.ToolResultBlock(
+                      "call-" + turn,
+                      "run_query",
+                      io.agentscope.core.message.TextBlock.builder().text("rows-" + turn).build()))
+              .build());
+    }
+    var trimmed = AgentScopeQueryAgent.forModel(messages);
+    assertThat(trimmed).hasSize(messages.size());
+    var visible = new StringBuilder();
+    for (var message : trimmed) {
+      message
+          .getContentBlocks(io.agentscope.core.message.TextBlock.class)
+          .forEach(block -> visible.append(block.getText()).append('|'));
+      for (var result : message.getContentBlocks(io.agentscope.core.message.ToolResultBlock.class))
+        for (var output : result.getOutput())
+          if (output instanceof io.agentscope.core.message.TextBlock text)
+            visible.append(text.getText()).append('|');
+    }
+    assertThat(visible.toString())
+        .doesNotContain("rows-1")
+        .contains("rows-2", "rows-3", "q1", "较早轮次的工具结果已省略");
+    var older =
+        trimmed
+            .get(1)
+            .getContentBlocks(io.agentscope.core.message.ToolResultBlock.class)
+            .getFirst();
+    assertThat(older.getId()).isEqualTo("call-1");
+    var twoQuestions = messages.subList(0, 4);
+    assertThat(AgentScopeQueryAgent.forModel(twoQuestions)).isSameAs(twoQuestions);
+  }
+
   @Test
   void ollamaProviderUsesTheNativeProtocolWithoutAKey() throws Exception {
     try (var server = server(Protocol.OLLAMA)) {

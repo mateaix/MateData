@@ -101,6 +101,46 @@ class SemanticCompilerTest {
   }
 
   @Test
+  void explicitSortsDecideWhichRowsTheLimitKeeps() {
+    for (var expectation :
+        Map.of(
+                QueryPlan.Sort.METRIC_DESC, "ORDER BY 2 DESC LIMIT 2",
+                QueryPlan.Sort.METRIC_ASC, "ORDER BY 2 ASC LIMIT 2",
+                QueryPlan.Sort.DIMENSION_ASC, "ORDER BY 1 ASC LIMIT 2",
+                QueryPlan.Sort.DIMENSION_DESC, "ORDER BY 1 DESC LIMIT 2")
+            .entrySet()) {
+      var plan = new QueryPlan("revenue", "region", Map.of(), 2, expectation.getKey());
+      var query = compiler.compile(sales, plan);
+      assertThat(query.sql()).as(expectation.getKey().name()).endsWith(expectation.getValue());
+      new SqlGuard().verify(query, sales, plan);
+    }
+    // The most recent periods of a time dimension.
+    assertThat(
+            compiler
+                .compile(
+                    sales,
+                    new QueryPlan("revenue", "month", Map.of(), 3, QueryPlan.Sort.DIMENSION_DESC))
+                .sql())
+        .endsWith("ORDER BY 1 DESC LIMIT 3");
+    // Without a dimension there is one row and nothing to order.
+    assertThat(
+            compiler
+                .compile(
+                    sales, new QueryPlan("revenue", null, Map.of(), 2, QueryPlan.Sort.METRIC_ASC))
+                .sql())
+        .doesNotContain("ORDER BY");
+  }
+
+  @Test
+  void aPlanWithADifferentSortFailsTheGuard() {
+    var descending = new QueryPlan("revenue", "region", Map.of(), 2, QueryPlan.Sort.METRIC_DESC);
+    var ascending = new QueryPlan("revenue", "region", Map.of(), 2, QueryPlan.Sort.METRIC_ASC);
+    assertThatThrownBy(
+            () -> new SqlGuard().verify(compiler.compile(sales, descending), sales, ascending))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void quotedPhysicalIdentifiersPreserveCaseAndDatabaseDialect() {
     var metric = new SemanticModel.Metric("Value", "金额", "Amount", "SUM", List.of());
     var dimension = new SemanticModel.Dimension("value", "分组", "Region", List.of());

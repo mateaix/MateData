@@ -225,4 +225,44 @@ class QueryAdmissionTest {
           .isInstanceOf(IllegalArgumentException.class);
     verifyNoInteractions(f.runs());
   }
+
+  @Test
+  void sortSurvivesRowLevelConstraintsAndRowsReportTheirScope() throws Exception {
+    var grants = mock(GrantRepository.class);
+    when(grants.find("alice", "sales"))
+        .thenReturn(
+            Optional.of(
+                new DatasetGrant(
+                    "alice",
+                    "sales",
+                    true,
+                    List.of("revenue"),
+                    List.of("category"),
+                    Map.of("region", "华东"))));
+    var f = fixture(grants, "ANALYST");
+    var scoped = new AtomicReference<Boolean>();
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              var rows =
+                  invocation
+                      .<QueryAgent.GovernedQuery>getArgument(1)
+                      .run(
+                          new QueryPlan(
+                              "revenue", "category", Map.of(), 2, QueryPlan.Sort.METRIC_ASC));
+              scoped.set(rows.rowScoped());
+              return new QueryAgent.Reply("");
+            });
+    var run = agentService(f, agent).ask("alice", "销售额最低的两个品类", "sales", "agent", null);
+    assertThat(run.status()).isEqualTo("SUCCEEDED");
+    assertThat(run.sql()).contains("WHERE region = ?").endsWith("ORDER BY 2 ASC LIMIT 2");
+    assertThat(scoped.get()).isTrue();
+    // A blank interpretation falls back to the platform summary.
+    assertThat(run.answer()).startsWith("已基于「销售经营分析」计算销售额");
+
+    var unrestricted = fixture(mock(GrantRepository.class), "ADMIN");
+    agentService(unrestricted, agent).ask("alice", "销售额最低的两个品类", "sales", "agent", null);
+    assertThat(scoped.get()).isFalse();
+  }
 }

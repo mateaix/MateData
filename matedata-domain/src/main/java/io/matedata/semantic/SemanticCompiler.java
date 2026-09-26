@@ -34,7 +34,20 @@ public final class SemanticCompiler {
     }
     if (dimension != null) {
       sql.append(" GROUP BY ").append(physical(model, dimension.column()));
-      sql.append(" ORDER BY ").append(chronological(dimension) ? "1 ASC" : "2 DESC");
+      var sort =
+          plan.sort() != null
+              ? plan.sort()
+              : chronological(dimension)
+                  ? QueryPlan.Sort.DIMENSION_ASC
+                  : QueryPlan.Sort.METRIC_DESC;
+      sql.append(" ORDER BY ")
+          .append(
+              switch (sort) {
+                case METRIC_DESC -> "2 DESC";
+                case METRIC_ASC -> "2 ASC";
+                case DIMENSION_ASC -> "1 ASC";
+                case DIMENSION_DESC -> "1 DESC";
+              });
     }
     sql.append(" LIMIT ").append(plan.limit());
     return new CompiledQuery(sql.toString(), params);

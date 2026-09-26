@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.*;
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
@@ -55,6 +56,11 @@ public class AgentScopeQueryAgent implements QueryAgent {
   static final int MAX_RESULT_CHARS = 4000;
   static final List<String> TOOL_NAMES = List.of("list_metrics", "list_dimensions", "run_query");
 
+  /** Questions whose tool results the model still sees verbatim, including the current one. */
+  static final int RECENT_TURNS = 2;
+
+  static final String TRIMMED_RESULT = "较早轮次的工具结果已省略；如需这些数据，请重新调用 run_query。";
+
   private final ModelSettings settings;
   private final Path root;
   private final AgentStateStore sessions;
@@ -96,7 +102,12 @@ public class AgentScopeQueryAgent implements QueryAgent {
                     exhausted.set(true);
                     return Flux.error(new IllegalArgumentException("模型调用次数已达到预算上限"));
                   }
-                  return next.apply(input);
+                  return next.apply(
+                      new ModelCallInput(
+                          forModel(input.messages()),
+                          input.tools(),
+                          input.options(),
+                          input.model()));
                 });
           }
         };
@@ -181,6 +192,8 @@ public class AgentScopeQueryAgent implements QueryAgent {
                 elapsed(started)));
         return new Reply(reply.get());
       }
+      // After an exhausted budget the final text is the framework's own error, never an answer.
+      boolean interpreted = !exhausted.get() && !reply.get().isBlank();
       observer.accept(
           new ExecutionStep(
               "Harness 结束",
@@ -188,10 +201,22 @@ public class AgentScopeQueryAgent implements QueryAgent {
               "已完成 "
                   + modelCalls.get()
                   + " 次模型调用"
-                  + (reply.get().isBlank() ? "；模型未给出解读，使用平台摘要" : "；已生成结果解读"),
+                  + (interpreted
+                      ? "；已生成结果解读"
+                      : exhausted.get() ? "；解读阶段达到执行步数上限，使用平台摘要" : "；模型未给出解读，使用平台摘要"),
               elapsed(started)));
-      return new Reply(reply.get());
+      return new Reply(interpreted ? reply.get() : "");
     } catch (Exception e) {
+      if (tools.fatal() == null && tools.executed()) {
+        // The governed query already produced authoritative rows; only the interpretation failed.
+        observer.accept(
+            new ExecutionStep(
+                "Harness 结束",
+                "SUCCEEDED",
+                "查询已完成；解读阶段" + (exhausted.get() ? "达到执行步数上限" : "超时或模型调用失败") + "，使用平台摘要",
+                elapsed(started)));
+        return new Reply("");
+      }
       observer.accept(
           new ExecutionStep(
               "Harness 结束",
@@ -211,14 +236,7 @@ public class AgentScopeQueryAgent implements QueryAgent {
         .get(turn.userId(), turn.sessionKey(), "agent_state", AgentState.class)
         .map(
             state ->
-                (int)
-                    state.getContext().stream()
-                        .filter(
-                            message ->
-                                message.getRole() == MsgRole.USER
-                                    && !message.getContentBlocks(TextBlock.class).isEmpty()
-                                    && message.getContentBlocks(ToolResultBlock.class).isEmpty())
-                        .count())
+                (int) state.getContext().stream().filter(AgentScopeQueryAgent::isQuestion).count())
         .orElse(0);
   }
 
@@ -262,9 +280,11 @@ public class AgentScopeQueryAgent implements QueryAgent {
     return "你是 MateData 的企业问数智能体，只能通过工具获取数据。\n"
         + "1. 先调用 list_metrics 和 list_dimensions，了解当前用户已授权的指标与维度；只能使用返回的 id。\n"
         + "2. 调用 run_query 执行一次受治理查询：选择一个指标，至多一个分组维度；过滤条件只支持维度的等值筛选。"
+        + "问“最低、最少、倒数”时 sort 用 metric_asc，问“最近 N 期”时 sort 用 dimension_desc，其余情况留空。"
         + "SQL 由平台生成并校验，你不能也不需要编写 SQL。\n"
         + "3. 根据 run_query 返回的数据，用简洁的中文回答问题：给出结论，引用具体数值，指出最高、最低或明显差异。"
-        + "不得编造数据中没有的数值或原因。使用普通文本和换行，不要使用 Markdown 格式。\n"
+        + "不得编造数据中没有的数值或原因。结果若注明已按数据权限限定，要说明结论只针对用户有权查看的范围，不要推断范围外的数据。"
+        + "使用普通文本和换行，不要使用 Markdown 格式。\n"
         + "4. 追问时结合之前的对话：省略的指标、维度和筛选条件沿用上一轮查询，只替换用户提到的部分，然后重新调用 run_query。"
         + "例如上一轮按区域查销售额，追问“那利润呢”就按区域查利润。\n"
         + "5. 只有在确实无法判断用户意图时，才用一句话向用户确认，此时不要调用 run_query。"
@@ -284,6 +304,50 @@ public class AgentScopeQueryAgent implements QueryAgent {
     return answer.length() > MAX_ANSWER_CHARS
         ? answer.substring(0, MAX_ANSWER_CHARS) + "…"
         : answer;
+  }
+
+  static QueryPlan.Sort sort(String value) {
+    return value == null || value.isBlank()
+        ? null
+        : QueryPlan.Sort.valueOf(value.strip().toUpperCase(Locale.ROOT));
+  }
+
+  /**
+   * Bounds the context sent to the model: tool results from questions before the most recent {@link
+   * #RECENT_TURNS} are replaced by a short note. Stored memory is left unchanged.
+   */
+  public static List<Msg> forModel(List<Msg> messages) {
+    var questions = new ArrayList<Integer>();
+    for (int i = 0; i < messages.size(); i++) if (isQuestion(messages.get(i))) questions.add(i);
+    if (questions.size() <= RECENT_TURNS) return messages;
+    int keepFrom = questions.get(questions.size() - RECENT_TURNS);
+    var trimmed = new ArrayList<Msg>(messages.size());
+    for (int i = 0; i < messages.size(); i++) {
+      var message = messages.get(i);
+      if (i >= keepFrom || message.getContentBlocks(ToolResultBlock.class).isEmpty()) {
+        trimmed.add(message);
+        continue;
+      }
+      var content = new ArrayList<ContentBlock>();
+      for (var block : message.getContent())
+        content.add(
+            block instanceof ToolResultBlock result
+                ? new ToolResultBlock(
+                    result.getId(),
+                    result.getName(),
+                    List.of(TextBlock.builder().text(TRIMMED_RESULT).build()),
+                    result.getMetadata(),
+                    result.getState())
+                : block);
+      trimmed.add(message.withContent(content));
+    }
+    return trimmed;
+  }
+
+  private static boolean isQuestion(Msg message) {
+    return message.getRole() == MsgRole.USER
+        && !message.getContentBlocks(TextBlock.class).isEmpty()
+        && message.getContentBlocks(ToolResultBlock.class).isEmpty();
   }
 
   /** The UI shows answers as plain text: drop emphasis markers and normalize list bullets. */
@@ -372,14 +436,21 @@ public class AgentScopeQueryAgent implements QueryAgent {
         name = "run_query",
         description =
             "执行一次受治理的聚合查询并返回结果行。metric 为指标 id；dimension 为分组维度 id，不分组时传空字符串；"
-                + "filtersJson 为维度 id 到等值筛选值的 JSON 对象，例如 {} 或 {\"region\":\"华东\"}；limit 为 1–1000。"
-                + "每个问题只能成功执行一次。")
+                + "filtersJson 为维度 id 到等值筛选值的 JSON 对象，例如 {} 或 {\"region\":\"华东\"}；limit 为 1–1000；"
+                + "sort 决定截取前 limit 行的顺序，可留空。每个问题只能成功执行一次。")
     public String runQuery(
         @ToolParam(name = "metric", description = "指标 id") String metric,
         @ToolParam(name = "dimension", description = "分组维度 id；总计时传空字符串") String dimension,
         @ToolParam(name = "filtersJson", description = "JSON 对象，例如 {} 或 {\"region\":\"华东\"}")
             String filtersJson,
-        @ToolParam(name = "limit", description = "结果上限 1–1000") int limit) {
+        @ToolParam(name = "limit", description = "结果上限 1–1000") int limit,
+        @ToolParam(
+                name = "sort",
+                description =
+                    "可选。metric_desc 指标从高到低（默认）；metric_asc 从低到高，用于最低、最少；"
+                        + "dimension_asc / dimension_desc 按维度值排序，时间维度默认从早到晚，最近 N 期用 dimension_desc",
+                required = false)
+            String sort) {
       long start = System.nanoTime();
       if (fatal.get() != null) return "查询已终止：数据权限或语义模型已变更。请停止调用工具。";
       if (executed.get()) return "本问题已完成查询，请直接根据已有结果回答，不要再次调用 run_query。";
@@ -391,7 +462,7 @@ public class AgentScopeQueryAgent implements QueryAgent {
             filtersJson.isBlank()
                 ? Map.of()
                 : JSON.readValue(filtersJson, new TypeReference<>() {});
-        plan = new QueryPlan(metric, dimension, filters, limit);
+        plan = new QueryPlan(metric, dimension, filters, limit, sort(sort));
         // Validate against the permitted vocabulary before touching any data.
         new SqlGuard().verify(new SemanticCompiler().compile(model, plan), model, plan);
       } catch (Exception e) {
@@ -436,6 +507,7 @@ public class AgentScopeQueryAgent implements QueryAgent {
       result.put("rows", shown);
       if (shown.size() < rows.rows().size())
         result.put("note", "仅展示前 " + shown.size() + " 行，完整结果已展示给用户");
+      if (rows.rowScoped()) result.put("scope", "结果已按当前用户的数据权限做行级限定，只包含其有权查看的数据，不代表全量");
       return write(result);
     }
 

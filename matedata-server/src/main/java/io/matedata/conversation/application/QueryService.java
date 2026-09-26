@@ -87,7 +87,8 @@ public class QueryService {
                     governed(
                         user, datasetId, model, grant, fingerprint, requested, steps, active, sql);
                 holder.set(done);
-                return new QueryAgent.Rows(done.result().columns(), done.result().rows());
+                return new QueryAgent.Rows(
+                    done.result().columns(), done.result().rows(), !grant.rowFilters().isEmpty());
               } catch (RuntimeException e) {
                 throw e;
               } catch (Exception e) {

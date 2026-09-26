@@ -20,8 +20,17 @@ public interface QueryAgent {
   record Turn(
       String question, SemanticModel model, String userId, String runId, String sessionKey) {}
 
-  /** Rows returned by the platform after authorization, compilation and SQL verification. */
-  record Rows(List<String> columns, List<Map<String, Object>> rows) {}
+  /**
+   * Rows returned by the platform after authorization, compilation and SQL verification.
+   *
+   * @param rowScoped the user's row-level permissions narrowed these rows; the filter values
+   *     themselves are never disclosed
+   */
+  record Rows(List<String> columns, List<Map<String, Object>> rows, boolean rowScoped) {
+    public Rows(List<String> columns, List<Map<String, Object>> rows) {
+      this(columns, rows, false);
+    }
+  }
 
   /** The only data access handed to the agent; implemented by the application service. */
   @FunctionalInterface

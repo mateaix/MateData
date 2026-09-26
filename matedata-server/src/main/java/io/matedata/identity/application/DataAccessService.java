@@ -94,7 +94,8 @@ public class DataAccessService {
                 throw new ApplicationException(Kind.FORBIDDEN, "查询筛选与行级授权冲突");
               filters.put(dimension, value);
             });
-    return new QueryPlan(requested.metric(), requested.dimension(), filters, requested.limit());
+    return new QueryPlan(
+        requested.metric(), requested.dimension(), filters, requested.limit(), requested.sort());
   }
 
   public List<DatasetGrant> all() {
