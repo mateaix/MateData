@@ -98,4 +98,29 @@ class QueryAdmissionTest {
     assertThat(result.toString()).doesNotContain("restricted-result-value");
     verify(f.runs()).save("alice", result);
   }
+
+  @Test
+  void rowFilterConflictReportsTheAuthorizationReason() throws Exception {
+    var grants = mock(GrantRepository.class);
+    when(grants.find("alice", "sales"))
+        .thenReturn(
+            Optional.of(
+                new DatasetGrant(
+                    "alice",
+                    "sales",
+                    true,
+                    List.of("revenue"),
+                    List.of("region"),
+                    Map.of("region", "华东"))));
+    var f = fixture(grants, "ANALYST");
+    var agent = mock(QueryPlanner.class);
+    when(agent.plan(anyString(), any(), anyString(), anyString(), any()))
+        .thenReturn(new QueryPlan("revenue", null, Map.of("region", "华南"), 10));
+    var executor = mock(QueryExecutor.class);
+    var service = new QueryService(f.models(), f.runs(), agent, executor, f.access());
+    var result = service.ask("alice", "华南销售额", "sales", "agent", null);
+    assertThat(result.status()).isEqualTo("FAILED");
+    assertThat(result.error()).isEqualTo("查询筛选与行级授权冲突");
+    verify(executor, never()).execute(any(), any(), any());
+  }
 }

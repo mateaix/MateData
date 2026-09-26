@@ -75,6 +75,32 @@ class SemanticCompilerTest {
   }
 
   @Test
+  void temporalDimensionsAreOrderedChronologicallyWhateverTheirId() {
+    var metric = new SemanticModel.Metric("revenue", "销售额", "amount", "SUM", List.of());
+    for (var type :
+        List.of(
+            ValueType.DATE, ValueType.TIME, ValueType.TIMESTAMP, ValueType.TIMESTAMP_WITH_ZONE)) {
+      var model =
+          new SemanticModel(
+              "orders",
+              "订单",
+              "",
+              "source",
+              "orders",
+              List.of(metric),
+              List.of(
+                  new SemanticModel.Dimension("order_date", "下单时间", "created", List.of(), type)),
+              SemanticModel.Dialect.ANSI);
+      assertThat(
+              compiler.compile(model, new QueryPlan("revenue", "order_date", Map.of(), 10)).sql())
+          .as(type.name())
+          .endsWith("ORDER BY 1 ASC LIMIT 10");
+    }
+    assertThat(compiler.compile(sales, new QueryPlan("revenue", "month", Map.of(), 10)).sql())
+        .endsWith("ORDER BY 1 ASC LIMIT 10");
+  }
+
+  @Test
   void quotedPhysicalIdentifiersPreserveCaseAndDatabaseDialect() {
     var metric = new SemanticModel.Metric("Value", "金额", "Amount", "SUM", List.of());
     var dimension = new SemanticModel.Dimension("value", "分组", "Region", List.of());

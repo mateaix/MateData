@@ -134,8 +134,11 @@ public class QueryService {
       runs.save(user, run);
       return run;
     } catch (Exception e) {
+      // Validation and authorization messages are user-facing; anything else may leak internals.
       String error =
-          e instanceof IllegalArgumentException ? e.getMessage() : "查询执行失败，请检查数据源、语义映射或模型连接";
+          e instanceof IllegalArgumentException || e instanceof ApplicationException
+              ? e.getMessage()
+              : "查询执行失败，请检查数据源、语义映射或模型连接";
       steps.add(new QueryRun.Step(active, "FAILED", error, 0));
       var run =
           new QueryRun(

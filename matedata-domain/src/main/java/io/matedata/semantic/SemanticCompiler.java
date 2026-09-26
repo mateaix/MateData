@@ -34,10 +34,19 @@ public final class SemanticCompiler {
     }
     if (dimension != null) {
       sql.append(" GROUP BY ").append(physical(model, dimension.column()));
-      sql.append(" ORDER BY ").append(dimension.id().equals("month") ? "1 ASC" : "2 DESC");
+      sql.append(" ORDER BY ").append(chronological(dimension) ? "1 ASC" : "2 DESC");
     }
     sql.append(" LIMIT ").append(plan.limit());
     return new CompiledQuery(sql.toString(), params);
+  }
+
+  /** Time series read in time order; the demo "month" dimension stores periods as text. */
+  private static boolean chronological(SemanticModel.Dimension dimension) {
+    return dimension.id().equals("month")
+        || switch (dimension.valueType()) {
+          case DATE, TIME, TIMESTAMP, TIMESTAMP_WITH_ZONE -> true;
+          case TEXT, NUMBER, BOOLEAN -> false;
+        };
   }
 
   private String alias(SemanticModel model, String id) {
