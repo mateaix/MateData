@@ -210,10 +210,8 @@ nav button.active {
   font-weight: 600;
 }
 .nav-icon {
-  width: 18px;
-  text-align: center;
-  font-size: 20px;
-  font-weight: 400;
+  flex: none;
+  font-size: 17px;
 }
 .nav-badge {
   font-size: 8px;
@@ -271,6 +269,9 @@ nav button.active {
   margin-left: auto;
   color: #87958d;
   font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 .main-shell {
   margin-left: 230px;
@@ -327,7 +328,7 @@ nav button.active {
   margin-bottom: 0;
 }
 .heading-decoration {
-  font-size: 65px;
+  font-size: 56px;
   color: #bcccbc;
   line-height: 1;
   margin-right: 17px;
@@ -405,6 +406,9 @@ nav button.active {
   font-size: 11px;
   padding: 0;
   color: #4d806a;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 .section-heading {
   display: flex;
@@ -442,7 +446,7 @@ nav button.active {
   border-color: #90b39a;
 }
 .example-icon {
-  font-size: 22px;
+  font-size: 18px;
   color: #698771;
   display: grid;
   place-items: center;
@@ -525,6 +529,11 @@ nav button.active {
   font-size: 10px;
   color: #a2ad9c;
   margin: 25px 0 0;
+}
+.trust-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .content-footer {
   border-top: 1px solid #e5e9df;
@@ -692,7 +701,7 @@ nav button.active {
   height: 43px;
   display: grid;
   place-items: center;
-  font-size: 25px;
+  font-size: 22px;
   color: #6c8b60;
 }
 .source-url {

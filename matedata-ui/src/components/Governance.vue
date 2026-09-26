@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { ApiError, json } from "../api";
 import { createSessionScope, StaleSessionError } from "../session";
 import type { Dataset, User, PermissionGrant, AuditEntry } from "../types";
+import AppIcon from "./AppIcon.vue";
 const props = defineProps<{
   request: <T>(path: string, init?: RequestInit) => Promise<T>;
   datasets: Dataset[];
@@ -183,7 +184,7 @@ onBeforeUnmount(() => {
         ><div class="section-heading">
           <h2>成员与角色</h2>
           <el-button type="primary" @click="userDialog = true"
-            >＋ 创建用户</el-button
+            ><AppIcon name="add" class="el-icon--left" />创建用户</el-button
           >
         </div>
         <p class="muted">

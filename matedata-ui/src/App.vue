@@ -16,6 +16,8 @@ import type {
 import DatasetDesigner from "./components/DatasetDesigner.vue";
 import Governance from "./components/Governance.vue";
 import RunResult from "./components/RunResult.vue";
+import AppIcon from "./components/AppIcon.vue";
+import type { IconName } from "./icons";
 import { createModelVersions, runMatchesDataset } from "./modelVersions";
 import { createSessionScope, StaleSessionError } from "./session";
 const session = createSessionScope();
@@ -37,37 +39,37 @@ type Page =
   | "evaluations"
   | "settings"
   | "governance";
-const pages: { id: Page; name: string; icon: string; caption: string }[] = [
-  { id: "ask", name: "智能问数", icon: "✳", caption: "从一个好问题开始" },
-  { id: "sources", name: "数据连接", icon: "▤", caption: "连接业务的数据基础" },
+const pages: { id: Page; name: string; icon: IconName; caption: string }[] = [
+  { id: "ask", name: "智能问数", icon: "ask", caption: "从一个好问题开始" },
+  { id: "sources", name: "数据连接", icon: "sources", caption: "连接业务的数据基础" },
   {
     id: "datasets",
     name: "语义模型",
-    icon: "◇",
+    icon: "datasets",
     caption: "让业务语言与数据对齐",
   },
   {
     id: "runs",
     name: "查询记录",
-    icon: "◷",
+    icon: "runs",
     caption: "每一次分析，都有迹可循",
   },
   {
     id: "evaluations",
     name: "质量评测",
-    icon: "◎",
+    icon: "evaluations",
     caption: "以可复现的结果建立信任",
   },
   {
     id: "settings",
     name: "模型设置",
-    icon: "⚙",
+    icon: "settings",
     caption: "配置你的智能分析引擎",
   },
   {
     id: "governance",
     name: "团队治理",
-    icon: "⊞",
+    icon: "governance",
     caption: "让权限与责任清晰可见",
   },
 ];
@@ -150,14 +152,14 @@ const examples = computed(() => {
     return dataset.metrics.slice(0, 4).map((metric) => ({
       title: metric.name,
       question: metric.name,
-      icon: "↗",
+      icon: "trend" as IconName,
     }));
   return dataset.dimensions.slice(0, 4).map((dimension, index) => {
     const metric = dataset.metrics[index % dataset.metrics.length]!;
     return {
       title: `${dimension.name} · ${metric.name}`,
       question: `各${dimension.name}${metric.name}`,
-      icon: ["↗", "◈", "⌁", "⤴"][index]!,
+      icon: (["trend", "share", "series", "distribution"] as const)[index]!,
     };
   });
 });
@@ -764,7 +766,8 @@ onMounted(async () => {
             size="large"
             :loading="loginBusy"
             class="full"
-            >进入工作空间 →</el-button
+            >进入工作空间<AppIcon name="forward" class="el-icon--right"
+          /></el-button
           ></el-form
         >
         <p class="login-hint">
@@ -791,8 +794,7 @@ onMounted(async () => {
           :class="{ active: page === item.id }"
           @click="navigate(item.id)"
         >
-          <span class="nav-icon">{{ item.icon }}</span
-          >{{ item.name
+          <AppIcon class="nav-icon" :name="item.icon" />{{ item.name
           }}<span v-if="item.id === 'ask'" class="nav-badge">AI</span>
         </button>
       </nav>
@@ -812,7 +814,7 @@ onMounted(async () => {
           ><span
             >{{ user.displayName || user.username
             }}<small>{{ admin ? "管理员" : "成员" }}</small></span
-          ><span class="logout">退出 ↗</span>
+          ><span class="logout">退出<AppIcon name="logout" /></span>
         </button>
       </div>
     </aside>
@@ -850,7 +852,7 @@ onMounted(async () => {
               <h1>今天，想从数据中发现什么？</h1>
               <p>用自然语言提问，让业务洞察触手可及。</p>
             </div>
-            <span class="heading-decoration">✳</span>
+            <AppIcon class="heading-decoration" name="ask" />
           </div>
           <section class="composer">
             <div class="composer-top">
@@ -912,7 +914,8 @@ onMounted(async () => {
                 :loading="querying"
                 @click="ask"
                 >{{ querying ? "正在分析" : "开始分析" }}
-                <span v-if="!querying">↗</span></el-button
+                <AppIcon v-if="!querying" name="send" class="el-icon--right"
+                /></el-button
               >
             </div>
           </section>
@@ -922,17 +925,11 @@ onMounted(async () => {
                 ? "在模型设置中配置服务后，即可使用真实模型推理。"
                 : "请联系管理员配置模型服务。"
             }}<button v-if="admin" @click="navigate('settings')">
-              配置模型 ↗
+              配置模型<AppIcon name="forward" />
             </button>
           </div>
           <div v-if="querying" class="pending">
-            <el-icon class="is-loading"
-              ><svg viewBox="0 0 24 24">
-                <path
-                  fill="currentColor"
-                  d="M12 2a10 10 0 0 1 10 10h-3a7 7 0 0 0-7-7z"
-                /></svg
-            ></el-icon>
+            <AppIcon name="loading" spin />
             <div>
               <strong>正在理解问题并执行查询</strong>
               <p>完成后将一并展示结果、SQL 与执行轨迹，请稍候。</p>
@@ -957,10 +954,10 @@ onMounted(async () => {
                 :key="example.question"
                 @click="question = example.question"
               >
-                <span class="example-icon">{{ example.icon }}</span
+                <span class="example-icon"><AppIcon :name="example.icon" /></span
                 ><small>{{ example.title }}</small
                 ><strong>{{ example.question }}</strong
-                ><span class="example-arrow">↗</span>
+                ><AppIcon class="example-arrow" name="open" />
               </button>
             </div>
             <section class="dataset-preview">
@@ -975,7 +972,7 @@ onMounted(async () => {
                       : "请先创建数据连接与语义模型。"
                   }}
                 </p>
-                <button @click="navigate('datasets')">查看语义模型 ↗</button>
+                <button @click="navigate('datasets')">查看语义模型<AppIcon name="forward" /></button>
               </div>
               <div class="field-summary">
                 <div>
@@ -1004,8 +1001,9 @@ onMounted(async () => {
               </div>
             </section>
             <div class="trust-row">
-              <span>◇ 只读查询保护</span><span>◷ 完整执行轨迹</span
-              ><span>▤ 语义层统一口径</span>
+              <span><AppIcon name="readOnly" />只读查询保护</span
+              ><span><AppIcon name="runs" />完整执行轨迹</span
+              ><span><AppIcon name="datasets" />语义层统一口径</span>
             </div></template
           ></template
         >
@@ -1020,12 +1018,12 @@ onMounted(async () => {
               v-if="page === 'sources' && admin"
               type="primary"
               @click="sourceDialog = true"
-              >＋ 新建连接</el-button
+              ><AppIcon name="add" class="el-icon--left" />新建连接</el-button
             ><el-button
               v-if="page === 'datasets' && admin"
               type="primary"
               @click="editDataset()"
-              >＋ 新建模型</el-button
+              ><AppIcon name="add" class="el-icon--left" />新建模型</el-button
             ><el-button v-if="page === 'runs'" @click="navigate('runs')"
               >刷新记录</el-button
             >
@@ -1043,7 +1041,7 @@ onMounted(async () => {
                 class="source-card"
               >
                 <div class="source-head">
-                  <span class="source-icon">▤</span
+                  <span class="source-icon"><AppIcon name="database" /></span
                   ><el-tag type="info" effect="plain">{{
                     source.type === "DEMO" ? "内置演示" : source.type
                   }}</el-tag>
@@ -1060,7 +1058,8 @@ onMounted(async () => {
                     @click="testSource(source)"
                     >测试连接</el-button
                   ><el-button text type="primary" @click="showTables(source)"
-                    >浏览数据表 →</el-button
+                    >浏览数据表<AppIcon name="forward" class="el-icon--right"
+                    /></el-button
                   >
                 </div>
               </article>
@@ -1091,7 +1090,7 @@ onMounted(async () => {
                     text
                     type="primary"
                     @click="editDataset(dataset)"
-                    >编辑模型 ↗</el-button
+                    ><AppIcon name="edit" class="el-icon--left" />编辑模型</el-button
                   >
                 </div>
                 <p class="muted">{{ dataset.description }}</p>
@@ -1130,7 +1129,7 @@ onMounted(async () => {
           <template v-else-if="page === 'runs'"
             ><div v-if="detail">
               <el-button text type="primary" @click="detail = null"
-                >← 返回当前页</el-button
+                ><AppIcon name="back" class="el-icon--left" />返回当前页</el-button
               ><RunResult :run="detail" :dataset="datasetForRun(detail)" />
             </div>
             <section v-else class="table-card">
@@ -1192,11 +1191,12 @@ onMounted(async () => {
                   <el-button
                     :disabled="busy || runPageOffsets.length < 2"
                     @click="loadNewerRuns"
-                    >← 较新记录</el-button
+                    ><AppIcon name="back" class="el-icon--left" />较新记录</el-button
                   ><el-button
                     :disabled="busy || !hasOlderRuns"
                     @click="loadOlderRuns"
-                    >较早记录 →</el-button
+                    >较早记录<AppIcon name="forward" class="el-icon--right"
+                    /></el-button
                   >
                 </div>
               </div>
@@ -1266,7 +1266,8 @@ onMounted(async () => {
                   :loading="evaluating"
                   :disabled="!canExecute"
                   @click="runEvaluation"
-                  >运行评测 →</el-button
+                  >运行评测<AppIcon name="forward" class="el-icon--right"
+                  /></el-button
                 >
               </div>
             </div>

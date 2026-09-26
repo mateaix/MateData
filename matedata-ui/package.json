@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "2.3.2",
     "element-plus": "2.14.6",
     "vue": "3.5.43"
   },

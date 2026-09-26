@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ApiError } from "../api";
 import { StaleSessionError } from "../session";
 import type { Dataset, Field, Source } from "../types";
+import AppIcon from "./AppIcon.vue";
 type MetadataTable = {
   name: string;
   columns: { name: string; type: string }[];
@@ -298,7 +299,7 @@ function submit() {
       <div class="section-heading">
         <h2>业务指标 <small>至少一个</small></h2>
         <el-button @click="draft.metrics.push(newField(true))"
-          >＋ 添加指标</el-button
+          ><AppIcon name="add" class="el-icon--left" />添加指标</el-button
         >
       </div>
       <el-table :data="draft.metrics" empty-text="添加一个业务指标以继续"
@@ -354,7 +355,7 @@ function submit() {
       <div class="section-heading">
         <h2>分析维度 <small>可选</small></h2>
         <el-button @click="draft.dimensions.push(newField(false))"
-          >＋ 添加维度</el-button
+          ><AppIcon name="add" class="el-icon--left" />添加维度</el-button
         >
       </div>
       <el-table
