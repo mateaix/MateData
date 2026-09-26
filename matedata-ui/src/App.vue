@@ -7,6 +7,7 @@ import type {
   Evaluation,
   EvaluationResult,
   Model,
+  ModelProvider,
   Run,
   RunPage,
   Source,
@@ -19,6 +20,7 @@ import RunResult from "./components/RunResult.vue";
 import AppIcon from "./components/AppIcon.vue";
 import type { IconName } from "./icons";
 import { createModelVersions, runMatchesDataset } from "./modelVersions";
+import { runStatus } from "./runStatus";
 import { createSessionScope, StaleSessionError } from "./session";
 const session = createSessionScope();
 const modelVersions = createModelVersions();
@@ -41,7 +43,12 @@ type Page =
   | "governance";
 const pages: { id: Page; name: string; icon: IconName; caption: string }[] = [
   { id: "ask", name: "智能问数", icon: "ask", caption: "从一个好问题开始" },
-  { id: "sources", name: "数据连接", icon: "sources", caption: "连接业务的数据基础" },
+  {
+    id: "sources",
+    name: "数据连接",
+    icon: "sources",
+    caption: "连接业务的数据基础",
+  },
   {
     id: "datasets",
     name: "语义模型",
@@ -96,6 +103,7 @@ let runLoadVersion = 0;
 const evaluationReports = ref<EvaluationResult[]>([]);
 const reportLoading = ref(false);
 const model = ref<Model>({
+  provider: "OPENAI_COMPATIBLE",
   baseUrl: "",
   model: "",
   configured: false,
@@ -103,6 +111,13 @@ const model = ref<Model>({
   timeoutSeconds: 60,
   apiKey: "",
 });
+/** Agent follow-ups share a server-side conversation; demo mode never does. */
+const conversationId = ref("");
+const conversationTurns = ref<string[]>([]);
+function newConversation() {
+  conversationId.value = "";
+  conversationTurns.value = [];
+}
 const question = ref(""),
   datasetId = ref(""),
   mode = ref<"demo" | "agent">("demo"),
@@ -175,6 +190,23 @@ function resetSourceDraft() {
     password: "",
   };
 }
+// A follow-up only makes sense against the same dataset in agent mode.
+watch([datasetId, mode], () => newConversation());
+const providerDefaults: Record<ModelProvider, string> = {
+  OPENAI_COMPATIBLE: "",
+  OLLAMA: "http://127.0.0.1:11434",
+};
+watch(
+  () => model.value.provider,
+  (next, previous) => {
+    if (!previous || next === previous) return;
+    if (
+      !model.value.baseUrl ||
+      model.value.baseUrl === providerDefaults[previous]
+    )
+      model.value.baseUrl = providerDefaults[next];
+  },
+);
 watch(
   sourceDialog,
   (open) => {
@@ -236,6 +268,7 @@ function clearSession() {
   reportLoading.value = false;
   datasetId.value = "";
   question.value = "";
+  newConversation();
   system.value = null;
   page.value = "ask";
   mode.value = "demo";
@@ -243,6 +276,7 @@ function clearSession() {
   datasetDialog.value = false;
   tableDialog.value = false;
   model.value = {
+    provider: "OPENAI_COMPATIBLE",
     baseUrl: "",
     model: "",
     configured: false,
@@ -414,6 +448,7 @@ async function ask() {
   const sessionCurrent = session.capture();
   const version = ++queryVersion;
   const requestedDataset = datasetId.value;
+  const requestedMode = mode.value;
   const modelVersion = modelVersions.capture(requestedDataset);
   pendingQueryDataset = requestedDataset;
   const current = () => sessionCurrent() && queryVersion === version;
@@ -427,7 +462,11 @@ async function ask() {
       body: json({
         question: question.value.trim(),
         datasetId: requestedDataset,
-        mode: mode.value,
+        mode: requestedMode,
+        conversationId:
+          requestedMode === "agent" && conversationId.value
+            ? conversationId.value
+            : undefined,
       }),
     });
     if (!current()) return;
@@ -447,9 +486,14 @@ async function ask() {
         reconciled.get(requestedDataset),
       ) &&
       runMatchesDataset(value, datasetForRun(value))
-    )
+    ) {
       activeRun.value = value;
-    else if (current()) error.value = changedScopeMessage;
+      if (requestedMode === "agent" && value.conversationId) {
+        conversationId.value = value.conversationId;
+        conversationTurns.value = [...conversationTurns.value, value.question];
+        question.value = "";
+      }
+    } else if (current()) error.value = changedScopeMessage;
   }, valid);
   if (current()) {
     querying.value = false;
@@ -766,10 +810,10 @@ onMounted(async () => {
             size="large"
             :loading="loginBusy"
             class="full"
-            >进入工作空间<AppIcon name="forward" class="el-icon--right"
-          /></el-button
-          ></el-form
-        >
+            >进入工作空间<AppIcon
+              name="forward"
+              class="el-icon--right" /></el-button
+        ></el-form>
         <p class="login-hint">
           本地部署首次登录请使用环境变量配置的密码，或查看后端启动日志中的临时密码。
         </p>
@@ -880,6 +924,24 @@ onMounted(async () => {
                 ></el-radio-group
               >
             </div>
+            <div
+              v-if="mode === 'agent' && conversationTurns.length"
+              class="conversation-strip"
+            >
+              <AppIcon name="conversation" /><span
+                >追问模式 · 已进行
+                {{ conversationTurns.length }} 轮，智能体会结合上文理解</span
+              ><span class="conversation-turns">{{
+                conversationTurns.join(" / ")
+              }}</span
+              ><el-button
+                link
+                type="primary"
+                :disabled="querying"
+                @click="newConversation"
+                ><AppIcon name="add" class="el-icon--left" />新对话</el-button
+              >
+            </div>
             <el-input
               v-model="question"
               type="textarea"
@@ -887,9 +949,11 @@ onMounted(async () => {
               resize="none"
               maxlength="2000"
               :placeholder="
-                examples[0]?.question
-                  ? `例如：${examples[0].question}`
-                  : '输入当前数据集中的业务问题'
+                mode === 'agent' && conversationTurns.length
+                  ? '继续追问，例如：那利润呢？只看华东'
+                  : examples[0]?.question
+                    ? `例如：${examples[0].question}`
+                    : '输入当前数据集中的业务问题'
               "
               aria-label="输入业务问题"
               :disabled="querying || !canExecute"
@@ -915,8 +979,7 @@ onMounted(async () => {
                 @click="ask"
                 >{{ querying ? "正在分析" : "开始分析" }}
                 <AppIcon v-if="!querying" name="send" class="el-icon--right"
-                /></el-button
-              >
+              /></el-button>
             </div>
           </section>
           <div v-if="!system?.modelConfigured" class="inline-note">
@@ -954,7 +1017,8 @@ onMounted(async () => {
                 :key="example.question"
                 @click="question = example.question"
               >
-                <span class="example-icon"><AppIcon :name="example.icon" /></span
+                <span class="example-icon"
+                  ><AppIcon :name="example.icon" /></span
                 ><small>{{ example.title }}</small
                 ><strong>{{ example.question }}</strong
                 ><AppIcon class="example-arrow" name="open" />
@@ -972,7 +1036,9 @@ onMounted(async () => {
                       : "请先创建数据连接与语义模型。"
                   }}
                 </p>
-                <button @click="navigate('datasets')">查看语义模型<AppIcon name="forward" /></button>
+                <button @click="navigate('datasets')">
+                  查看语义模型<AppIcon name="forward" />
+                </button>
               </div>
               <div class="field-summary">
                 <div>
@@ -1059,8 +1125,7 @@ onMounted(async () => {
                     >测试连接</el-button
                   ><el-button text type="primary" @click="showTables(source)"
                     >浏览数据表<AppIcon name="forward" class="el-icon--right"
-                    /></el-button
-                  >
+                  /></el-button>
                 </div>
               </article>
             </div>
@@ -1090,7 +1155,10 @@ onMounted(async () => {
                     text
                     type="primary"
                     @click="editDataset(dataset)"
-                    ><AppIcon name="edit" class="el-icon--left" />编辑模型</el-button
+                    ><AppIcon
+                      name="edit"
+                      class="el-icon--left"
+                    />编辑模型</el-button
                   >
                 </div>
                 <p class="muted">{{ dataset.description }}</p>
@@ -1129,7 +1197,10 @@ onMounted(async () => {
           <template v-else-if="page === 'runs'"
             ><div v-if="detail">
               <el-button text type="primary" @click="detail = null"
-                ><AppIcon name="back" class="el-icon--left" />返回当前页</el-button
+                ><AppIcon
+                  name="back"
+                  class="el-icon--left"
+                />返回当前页</el-button
               ><RunResult :run="detail" :dataset="datasetForRun(detail)" />
             </div>
             <section v-else class="table-card">
@@ -1150,14 +1221,9 @@ onMounted(async () => {
                   ></el-table-column
                 ><el-table-column label="状态" width="110"
                   ><template #default="scope"
-                    ><el-tag
-                      :type="
-                        scope.row.status === 'SUCCEEDED' ? 'success' : 'danger'
-                      "
-                      >{{
-                        scope.row.status === "SUCCEEDED" ? "已完成" : "失败"
-                      }}</el-tag
-                    ></template
+                    ><el-tag :type="runStatus(scope.row.status).type">{{
+                      runStatus(scope.row.status).label
+                    }}</el-tag></template
                   ></el-table-column
                 ><el-table-column
                   prop="rowCount"
@@ -1191,17 +1257,18 @@ onMounted(async () => {
                   <el-button
                     :disabled="busy || runPageOffsets.length < 2"
                     @click="loadNewerRuns"
-                    ><AppIcon name="back" class="el-icon--left" />较新记录</el-button
+                    ><AppIcon
+                      name="back"
+                      class="el-icon--left"
+                    />较新记录</el-button
                   ><el-button
                     :disabled="busy || !hasOlderRuns"
                     @click="loadOlderRuns"
                     >较早记录<AppIcon name="forward" class="el-icon--right"
-                    /></el-button
-                  >
+                  /></el-button>
                 </div>
-              </div>
-            </section></template
-          >
+              </div></section
+          ></template>
           <template v-else-if="page === 'evaluations'">
             <el-alert
               v-if="!canExecute"
@@ -1267,8 +1334,7 @@ onMounted(async () => {
                   :disabled="!canExecute"
                   @click="runEvaluation"
                   >运行评测<AppIcon name="forward" class="el-icon--right"
-                  /></el-button
-                >
+                /></el-button>
               </div>
             </div>
             <section v-if="evaluationResult" class="result-card">
@@ -1332,7 +1398,8 @@ onMounted(async () => {
                 <div>
                   <h2>模型服务</h2>
                   <p class="muted">
-                    连接兼容 OpenAI Chat Completions 的模型服务。
+                    问数智能体基于 AgentScope Java
+                    运行，模型需支持工具调用（Function Calling）。
                   </p>
                 </div>
                 <el-tag :type="model.configured ? 'success' : 'info'">{{
@@ -1348,18 +1415,40 @@ onMounted(async () => {
                 label-position="top"
                 :disabled="!admin"
                 @submit.prevent="saveModel"
+                ><el-form-item label="服务类型"
+                  ><el-radio-group v-model="model.provider"
+                    ><el-radio-button value="OPENAI_COMPATIBLE"
+                      >OpenAI 兼容</el-radio-button
+                    ><el-radio-button value="OLLAMA"
+                      >Ollama 本地模型</el-radio-button
+                    ></el-radio-group
+                  ><span class="form-help">{{
+                    model.provider === "OLLAMA"
+                      ? "连接本机或内网的 Ollama 服务，无需 API Key；请选择支持工具调用的模型，如 qwen2.5、gemma4。"
+                      : "OpenAI、通义千问（DashScope 兼容模式）、DeepSeek 等提供 Chat Completions 接口的服务。"
+                  }}</span></el-form-item
                 ><el-form-item label="API Base URL"
                   ><el-input
                     v-model="model.baseUrl"
-                    placeholder="https://your-model-provider.example/v1"
+                    :placeholder="
+                      model.provider === 'OLLAMA'
+                        ? 'http://127.0.0.1:11434'
+                        : 'https://your-model-provider.example/v1'
+                    "
                   /><span class="form-help"
                     >由服务端访问的模型 API 地址。</span
                   ></el-form-item
                 ><el-form-item label="模型名称"
                   ><el-input
                     v-model="model.model"
-                    placeholder="输入服务商提供的模型标识" /></el-form-item
-                ><el-form-item label="API Key"
+                    :placeholder="
+                      model.provider === 'OLLAMA'
+                        ? '例如 gemma4:latest，可用 ollama list 查看'
+                        : '输入服务商提供的模型标识'
+                    " /></el-form-item
+                ><el-form-item
+                  v-if="model.provider !== 'OLLAMA'"
+                  label="API Key"
                   ><el-input
                     v-model="model.apiKey"
                     type="password"
@@ -1377,8 +1466,8 @@ onMounted(async () => {
                     ><el-input-number
                       v-model="model.maxSteps"
                       :min="1"
-                      :max="30" /></el-form-item
-                  ><el-form-item label="请求超时（秒）"
+                      :max="12" /></el-form-item
+                  ><el-form-item label="单次问数超时（秒）"
                     ><el-input-number
                       v-model="model.timeoutSeconds"
                       :min="5"

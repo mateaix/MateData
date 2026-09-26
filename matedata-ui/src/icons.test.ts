@@ -28,8 +28,11 @@ it("uses icons only through the central registry", () => {
   for (const file of sources) {
     const name = relative(root, file);
     let text = readFileSync(file, "utf-8");
-    for (const notation of allowedNotation) text = text.replaceAll(notation, "");
-    expect(text, `${name} contains an emoji or symbol icon`).not.toMatch(pictogram);
+    for (const notation of allowedNotation)
+      text = text.replaceAll(notation, "");
+    expect(text, `${name} contains an emoji or symbol icon`).not.toMatch(
+      pictogram,
+    );
     expect(text, `${name} contains hand-written SVG`).not.toMatch(/<svg[\s>]/);
     if (name !== "icons.ts")
       expect(text, `${name} imports icons directly`).not.toContain(

@@ -114,3 +114,41 @@ it("never applies new business labels or sample-source labels across authorizati
   expect(wrapper.text()).not.toContain("内置示例数据");
   wrapper.unmount();
 });
+it("labels an agent interpretation and keeps the table authoritative", async () => {
+  const wrapper = mount(RunResult, {
+    props: {
+      run: {
+        ...run("405720.00"),
+        mode: "agent",
+        answer: "华东利润最高\n- 华东：405720.00",
+      },
+    },
+    global: { plugins: [ElementPlus] },
+  });
+  await flushPromises();
+  expect(wrapper.find(".answer-label").text()).toContain("智能体解读");
+  expect(wrapper.find(".answer-label").text()).toContain("以下方结果表为准");
+  expect(wrapper.find(".answer p").text()).toContain("华东利润最高");
+  expect(wrapper.find(".el-tag").text()).toBe("已完成");
+  wrapper.unmount();
+});
+it("shows a clarifying question as needing input rather than a failure", async () => {
+  const wrapper = mount(RunResult, {
+    props: {
+      run: {
+        ...run("0"),
+        mode: "agent",
+        status: "NEEDS_INPUT",
+        columns: [],
+        rows: [],
+        answer: "你想按哪个维度查看利润？",
+      },
+    },
+    global: { plugins: [ElementPlus] },
+  });
+  await flushPromises();
+  expect(wrapper.find(".el-tag").text()).toBe("需要补充");
+  expect(wrapper.find(".answer-label").text()).toBe("智能体需要确认");
+  expect(wrapper.text()).not.toContain("执行失败");
+  wrapper.unmount();
+});

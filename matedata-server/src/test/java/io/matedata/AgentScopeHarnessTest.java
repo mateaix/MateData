@@ -1,88 +1,201 @@
 package io.matedata;
 
+import static io.matedata.FakeModelServer.*;
 import static org.assertj.core.api.Assertions.*;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sun.net.httpserver.HttpServer;
-import io.matedata.harness.application.ModelSettings;
-import io.matedata.harness.infrastructure.AgentScopeQueryPlanner;
+import com.fasterxml.jackson.databind.JsonNode;
+import io.matedata.harness.ExecutionStep;
+import io.matedata.harness.QueryAgent;
+import io.matedata.harness.infrastructure.AgentScopeQueryAgent;
+import io.matedata.semantic.QueryPlan;
 import io.matedata.semantic.SemanticModel;
-import io.matedata.shared.infrastructure.*;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
+import io.matedata.shared.ApplicationException;
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 class AgentScopeHarnessTest {
   @TempDir Path dir;
 
+  static final QueryAgent.Rows REGION_ROWS =
+      new QueryAgent.Rows(
+          List.of("region", "revenue"),
+          List.of(
+              Map.of("region", "华东", "revenue", new BigDecimal("1449000.00")),
+              Map.of("region", "西部", "revenue", new BigDecimal("1114200.00"))));
+
+  /** list_metrics → list_dimensions → run_query → interpretation, as a well-behaved model. */
+  static Script fullFlow(FakeModelServer[] self) {
+    return (request, call) -> {
+      int toolResults = toolResultsThisTurn(request);
+      return switch (toolResults) {
+        case 0 -> self[0].toolCall("call_m", "list_metrics", Map.of());
+        case 1 -> self[0].toolCall("call_d", "list_dimensions", Map.of());
+        case 2 ->
+            self[0].toolCall(
+                "call_q",
+                "run_query",
+                Map.of(
+                    "metric", "revenue", "dimension", "region", "filtersJson", "{}", "limit", 10));
+        default -> text("华东销售额最高，为 1449000.00；西部最低。");
+      };
+    };
+  }
+
+  FakeModelServer server(Protocol protocol) throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] = new FakeModelServer(protocol, fullFlow(holder));
+    return holder[0];
+  }
+
+  QueryAgent.Turn turn(String question, String session) {
+    return new QueryAgent.Turn(
+        question, SemanticModel.sales(), "alice", UUID.randomUUID().toString(), session);
+  }
+
   @Test
-  void realHarnessCallsProviderAndOnlyExposesSemanticTool() throws Exception {
-    var requests = new CopyOnWriteArrayList<String>();
-    var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-    server.createContext(
-        "/v1/chat/completions",
-        exchange -> {
-          requests.add(
-              new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-          String message =
-              requests.size() == 1
-                  ? "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_plan\",\"type\":\"function\",\"function\":{\"name\":\"submit_query_plan\",\"arguments\":\"{\\\"metric\\\":\\\"revenue\\\",\\\"dimension\\\":\\\"region\\\",\\\"filtersJson\\\":\\\"{}\\\",\\\"limit\\\":10}\"}}]}"
-                  : "{\"role\":\"assistant\",\"content\":\"已提交语义查询计划\"}";
-          String response =
-              "{\"id\":\"chatcmpl-test\",\"object\":\"chat.completion\",\"created\":1700000000,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":"
-                  + message
-                  + ",\"finish_reason\":\""
-                  + (requests.size() == 1 ? "tool_calls" : "stop")
-                  + "\"}],\"usage\":{\"prompt_tokens\":80,\"completion_tokens\":20,\"total_tokens\":100}}";
-          byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
-          exchange.getResponseHeaders().set("Content-Type", "application/json");
-          exchange.sendResponseHeaders(200, bytes.length);
-          exchange.getResponseBody().write(bytes);
-          exchange.close();
-        });
-    server.start();
-    try {
-      var ds =
-          new DriverManagerDataSource(
-              "jdbc:h2:mem:harness_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1", "sa", "");
-      var store = new DocumentStore(new JdbcTemplate(ds));
-      var vault = new SecretVault(dir.toString(), "");
-      var settings =
-          new ModelSettings(
-              new io.matedata.harness.infrastructure.JdbcModelConfigurationRepository(store),
-              vault);
-      settings.save(
-          "http://127.0.0.1:" + server.getAddress().getPort() + "/v1",
-          "test-model",
-          "fake-test-key",
-          4,
-          15);
-      var planner = new AgentScopeQueryPlanner(settings, dir.toString());
-      var steps = new CopyOnWriteArrayList<io.matedata.harness.ExecutionStep>();
-      var plan = planner.plan("各区域销售额", SemanticModel.sales(), "alice", "run-one", steps::add);
-      assertThat(plan.metric()).isEqualTo("revenue");
-      assertThat(plan.dimension()).isEqualTo("region");
-      assertThat(requests.size()).isBetween(1, 4);
-      var json = new ObjectMapper();
-      for (String request : requests) {
-        var tools = json.readTree(request).path("tools");
-        assertThat(tools.size()).isEqualTo(1);
-        assertThat(tools.get(0).path("function").path("name").asText())
-            .isEqualTo("submit_query_plan");
+  void agentReadsVocabularyRunsOneGovernedQueryAndInterpretsTheRows() throws Exception {
+    try (var server = server(Protocol.OPENAI_COMPATIBLE)) {
+      var settings = server.settings(dir, 6, 15);
+      var agent = new AgentScopeQueryAgent(settings, dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      var steps = new CopyOnWriteArrayList<ExecutionStep>();
+      var reply =
+          agent.answer(
+              turn("各区域销售额", "session-one"),
+              plan -> {
+                plans.add(plan);
+                return REGION_ROWS;
+              },
+              steps::add);
+
+      assertThat(reply.answer()).isEqualTo("华东销售额最高，为 1449000.00；西部最低。");
+      assertThat(plans).containsExactly(new QueryPlan("revenue", "region", Map.of(), 10));
+      for (JsonNode request : server.requests) {
+        var names = new ArrayList<String>();
+        request
+            .path("tools")
+            .forEach(tool -> names.add(tool.path("function").path("name").asText()));
+        assertThat(names).containsExactlyInAnyOrder("list_metrics", "list_dimensions", "run_query");
       }
-      assertThat(settings.view().toString()).doesNotContain("fake-test-key");
-      assertThat(steps)
-          .extracting(io.matedata.harness.ExecutionStep::name)
-          .contains("模型调用 #1", "语义工具", "Harness 结束");
-      assertThat(steps.toString()).doesNotContain("fake-test-key", "各区域销售额");
-    } finally {
-      server.stop(0);
+      // The model sees business vocabulary and governed rows, never physical names or secrets.
+      String sent = server.requests.toString();
+      assertThat(sent).contains("销售额", "区域", "1449000.00");
+      assertThat(sent).doesNotContain("amount", "sales_month", "demo_sales", "private-test-key");
+      assertThat(settings.view().toString()).doesNotContain("private-test-key");
+      assertThat(steps).extracting(ExecutionStep::name).contains("模型调用 #1", "语义工具", "Harness 结束");
+      assertThat(steps.getLast().status()).isEqualTo("SUCCEEDED");
+      assertThat(steps.toString()).doesNotContain("private-test-key", "各区域销售额");
+    }
+  }
+
+  @Test
+  void followUpsShareMemoryOnlyWithinTheSameSessionKey() throws Exception {
+    try (var server = server(Protocol.OPENAI_COMPATIBLE)) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      QueryAgent.GovernedQuery rows = plan -> REGION_ROWS;
+      agent.answer(turn("各区域销售额", "conversation-a"), rows, step -> {});
+      int firstTurn = server.requests.size();
+      agent.answer(turn("那西部呢", "conversation-a"), rows, step -> {});
+      var followUp = server.requests.get(firstTurn);
+      assertThat(messages(followUp, "user"))
+          .extracting(FakeModelServer::content)
+          .contains("各区域销售额", "那西部呢");
+
+      int beforeOther = server.requests.size();
+      agent.answer(turn("各区域销售额", "conversation-b"), rows, step -> {});
+      assertThat(messages(server.requests.get(beforeOther), "user"))
+          .extracting(FakeModelServer::content)
+          .containsExactly("各区域销售额");
+    }
+  }
+
+  @Test
+  void conversationsAreBoundedToAFixedNumberOfTurns() throws Exception {
+    try (var server = server(Protocol.OPENAI_COMPATIBLE)) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      for (int i = 0; i < 8; i++)
+        agent.answer(turn("各区域销售额 " + i, "long-conversation"), plan -> REGION_ROWS, step -> {});
+      int calls = server.requests.size();
+      assertThatThrownBy(
+              () ->
+                  agent.answer(turn("再看一次", "long-conversation"), plan -> REGION_ROWS, step -> {}))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("新建对话");
+      assertThat(server.requests).hasSize(calls);
+    }
+  }
+
+  @Test
+  void revokedScopeDuringTheQueryFailsTheRunAndNeverReachesTheModel() throws Exception {
+    try (var server = server(Protocol.OPENAI_COMPATIBLE)) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      assertThatThrownBy(
+              () ->
+                  agent.answer(
+                      turn("各区域销售额", "revoked"),
+                      plan -> {
+                        throw new ApplicationException(
+                            ApplicationException.Kind.FORBIDDEN, "数据权限或语义模型已变更，请重新查询");
+                      },
+                      step -> {}))
+          .isInstanceOfSatisfying(
+              ApplicationException.class,
+              e -> assertThat(e.kind()).isEqualTo(ApplicationException.Kind.FORBIDDEN));
+      assertThat(server.requests.toString()).doesNotContain("1449000");
+    }
+  }
+
+  @Test
+  void answersArePlainTextForTheUi() {
+    assertThat(
+            AgentScopeQueryAgent.plain(
+                "## 结论\n\n\n\n**华东**最高：\n*   **华东**：1,449,000.00\n- 西部：1,114,200.00"))
+        .isEqualTo("结论\n\n华东最高：\n- 华东：1,449,000.00\n- 西部：1,114,200.00");
+  }
+
+  @Test
+  void aClarifyingReplyIsReturnedAsTextWithoutTouchingData() throws Exception {
+    try (var server =
+        new FakeModelServer(Protocol.OPENAI_COMPATIBLE, (request, call) -> text("你想按哪个维度查看利润？"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var steps = new CopyOnWriteArrayList<ExecutionStep>();
+      var reply =
+          agent.answer(
+              turn("利润", "clarify"),
+              plan -> {
+                throw new AssertionError("governed query must not run");
+              },
+              steps::add);
+      assertThat(reply.answer()).isEqualTo("你想按哪个维度查看利润？");
+      assertThat(steps.getLast().detail()).contains("未执行查询");
+    }
+  }
+
+  @Test
+  void ollamaProviderUsesTheNativeProtocolWithoutAKey() throws Exception {
+    try (var server = server(Protocol.OLLAMA)) {
+      var settings = server.settings(dir, 6, 15);
+      assertThat(settings.configured()).isTrue();
+      var agent = new AgentScopeQueryAgent(settings, dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      var reply =
+          agent.answer(
+              turn("各区域销售额", "ollama"),
+              plan -> {
+                plans.add(plan);
+                return REGION_ROWS;
+              },
+              step -> {});
+      assertThat(reply.answer()).contains("华东");
+      assertThat(plans).containsExactly(new QueryPlan("revenue", "region", Map.of(), 10));
+      var first = server.requests.getFirst();
+      assertThat(first.path("model").asText()).isEqualTo("test-model");
+      assertThat(first.path("think").asBoolean(true)).isFalse();
+      assertThat(first.path("tools").size()).isEqualTo(3);
     }
   }
 }

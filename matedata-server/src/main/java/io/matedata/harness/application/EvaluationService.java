@@ -55,7 +55,9 @@ public class EvaluationService {
               pass,
               pass
                   ? "分组数量、维度值和数值与固定基准完全一致"
-                  : Objects.toString(run.error(), "结果不符合基准：请检查过滤条件、结果上限和指标定义"),
+                  : run.status().equals("NEEDS_INPUT")
+                      ? "智能体请求补充信息，未执行查询"
+                      : Objects.toString(run.error(), "结果不符合基准：请检查过滤条件、结果上限和指标定义"),
               run.id()));
     }
     var report =

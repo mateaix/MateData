@@ -44,14 +44,24 @@ public class PlatformController {
   }
 
   public record Settings(
-      String baseUrl, String model, String apiKey, int maxSteps, int timeoutSeconds) {}
+      String provider,
+      String baseUrl,
+      String model,
+      String apiKey,
+      int maxSteps,
+      int timeoutSeconds) {}
 
   @PutMapping("/settings/model")
   public Map<String, Object> save(@RequestBody Settings body, HttpServletRequest request) {
     var u = Access.admin(request);
     var r =
         settings.save(
-            body.baseUrl(), body.model(), body.apiKey(), body.maxSteps(), body.timeoutSeconds());
+            body.provider() == null ? "OPENAI_COMPATIBLE" : body.provider(),
+            body.baseUrl(),
+            body.model(),
+            body.apiKey(),
+            body.maxSteps(),
+            body.timeoutSeconds());
     audit.record(u.username(), "MODEL_SETTINGS_UPDATE", body.model());
     return r;
   }

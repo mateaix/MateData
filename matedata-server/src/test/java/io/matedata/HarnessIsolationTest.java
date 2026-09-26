@@ -4,8 +4,9 @@ import static org.assertj.core.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.matedata.harness.QueryAgent;
 import io.matedata.harness.application.ModelSettings;
-import io.matedata.harness.infrastructure.AgentScopeQueryPlanner;
+import io.matedata.harness.infrastructure.AgentScopeQueryAgent;
 import io.matedata.harness.infrastructure.JdbcModelConfigurationRepository;
 import io.matedata.semantic.SemanticModel;
 import io.matedata.shared.infrastructure.DocumentStore;
@@ -86,7 +87,7 @@ class HarnessIsolationTest {
                                 "function",
                                 Map.of(
                                     "name",
-                                    "submit_query_plan",
+                                    "run_query",
                                     "arguments",
                                     json.writeValueAsString(arguments)))));
               }
@@ -138,17 +139,30 @@ class HarnessIsolationTest {
             "local-test-key",
             4,
             25);
-        var planner = new AgentScopeQueryPlanner(settings, dir.toString());
-        var results = new ArrayList<Future<io.matedata.semantic.QueryPlan>>();
+        var planner = new AgentScopeQueryAgent(settings, dir.toString());
+        var plans = new ConcurrentHashMap<String, io.matedata.semantic.QueryPlan>();
+        var results = new ArrayList<Future<QueryAgent.Reply>>();
         for (int i = 0; i < 8; i++) {
           String scope = "scope-" + i;
           results.add(
               workers.submit(
                   () ->
-                      planner.plan(scope, SemanticModel.sales(), "user-" + scope, "run-" + scope)));
+                      planner.answer(
+                          new QueryAgent.Turn(
+                              scope,
+                              SemanticModel.sales(),
+                              "user-" + scope,
+                              "run-" + scope,
+                              "session-" + scope),
+                          plan -> {
+                            assertThat(plans.putIfAbsent(scope, plan)).isNull();
+                            return new QueryAgent.Rows(List.of("revenue"), List.of());
+                          },
+                          step -> {})));
         }
         for (int i = 0; i < results.size(); i++) {
-          assertThat(results.get(i).get(30, TimeUnit.SECONDS).filters())
+          results.get(i).get(30, TimeUnit.SECONDS);
+          assertThat(plans.get("scope-" + i).filters())
               .containsExactlyEntriesOf(Map.of("region", "scope-" + i));
         }
         assertThat(failures).isEmpty();

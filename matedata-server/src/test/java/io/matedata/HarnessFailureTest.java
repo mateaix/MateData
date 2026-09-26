@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.matedata.harness.ExecutionStep;
+import io.matedata.harness.QueryAgent;
 import io.matedata.harness.application.ModelSettings;
 import io.matedata.harness.infrastructure.*;
 import io.matedata.semantic.SemanticModel;
@@ -25,7 +26,17 @@ class HarnessFailureTest {
   @TempDir Path dir;
   final ObjectMapper json = new ObjectMapper();
 
-  AgentScopeQueryPlanner planner(HttpServer server, int steps, int timeout) throws Exception {
+  /** A governed query that must never run: every scenario here fails before data access. */
+  static final QueryAgent.GovernedQuery NEVER =
+      plan -> {
+        throw new AssertionError("governed query must not run");
+      };
+
+  static QueryAgent.Turn turn(String runId) {
+    return new QueryAgent.Turn("销售额", SemanticModel.sales(), "alice", runId, runId);
+  }
+
+  AgentScopeQueryAgent planner(HttpServer server, int steps, int timeout) throws Exception {
     var store =
         new DocumentStore(
             new JdbcTemplate(
@@ -40,7 +51,7 @@ class HarnessFailureTest {
         "private-test-key",
         steps,
         timeout);
-    return new AgentScopeQueryPlanner(settings, dir.toString());
+    return new AgentScopeQueryAgent(settings, dir.toString());
   }
 
   @Test
@@ -66,7 +77,7 @@ class HarnessFailureTest {
                           "function",
                           Map.of(
                               "name",
-                              "submit_query_plan",
+                              "run_query",
                               "arguments",
                               json.writeValueAsString(
                                   Map.of(
@@ -101,8 +112,7 @@ class HarnessFailureTest {
     try {
       var steps = new CopyOnWriteArrayList<ExecutionStep>();
       var planner = planner(server, 2, 10);
-      assertThatThrownBy(
-              () -> planner.plan("销售额", SemanticModel.sales(), "alice", "invalid-plan", steps::add))
+      assertThatThrownBy(() -> planner.answer(turn("invalid-plan"), NEVER, steps::add))
           .isInstanceOf(IllegalArgumentException.class);
       assertThat(calls.get()).isBetween(1, 2);
       assertThat(steps)
@@ -139,10 +149,7 @@ class HarnessFailureTest {
     try {
       var steps = new CopyOnWriteArrayList<ExecutionStep>();
       var planner = planner(server, 2, 5);
-      assertThatThrownBy(
-              () ->
-                  planner.plan(
-                      "销售额", SemanticModel.sales(), "alice", "failed-provider", steps::add))
+      assertThatThrownBy(() -> planner.answer(turn("failed-provider"), NEVER, steps::add))
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageNotContaining("private-provider-detail");
       assertThat(steps.getLast().status()).isEqualTo("FAILED");
@@ -176,10 +183,7 @@ class HarnessFailureTest {
       Assertions.assertTimeoutPreemptively(
           Duration.ofSeconds(8),
           () ->
-              assertThatThrownBy(
-                      () ->
-                          planner.plan(
-                              "销售额", SemanticModel.sales(), "alice", "timed-out", steps::add))
+              assertThatThrownBy(() -> planner.answer(turn("timed-out"), NEVER, steps::add))
                   .isInstanceOf(IllegalArgumentException.class));
       assertThat(steps.getLast().status()).isEqualTo("FAILED");
     } finally {

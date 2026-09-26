@@ -2,6 +2,7 @@ import {
   Aim,
   ArrowLeft,
   ArrowRight,
+  ChatDotRound,
   Clock,
   Coin,
   Collection,
@@ -38,6 +39,7 @@ export const icons = {
   // Domain objects and assurances.
   database: Coin,
   readOnly: Lock,
+  conversation: ChatDotRound,
   // Suggested analyses.
   trend: TrendCharts,
   share: PieChart,

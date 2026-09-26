@@ -588,6 +588,43 @@ nav button.active {
   font-size: 13px;
   margin: 20px 0;
 }
+.answer p {
+  margin: 0;
+  line-height: 1.8;
+  white-space: pre-line;
+}
+.answer-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4d806a;
+  margin-bottom: 8px;
+}
+.answer-label small {
+  font-weight: 400;
+  color: #98a295;
+  margin-left: 8px;
+}
+.conversation-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #6f8a6a;
+  background: #edf4e9;
+  border: 1px solid #dbe6d3;
+  border-radius: 7px;
+  padding: 7px 12px;
+  margin-bottom: 10px;
+}
+.conversation-turns {
+  flex: 1;
+  min-width: 0;
+  color: #98a295;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sql {
   background: #18382f;
   color: #d2e6d9;

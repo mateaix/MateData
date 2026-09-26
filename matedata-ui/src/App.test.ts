@@ -904,3 +904,81 @@ it("does not let a late recovery catalog override a newer model publication", as
   expect(vm.datasets[0].scopeFingerprint).toBe("newer");
   expect(vm.activeRun).toBeNull();
 });
+it("carries the agent conversation into follow-ups and resets it on context changes", async () => {
+  await start();
+  const vm = state();
+  const dataset = {
+    id: "sales",
+    name: "Sales",
+    description: "",
+    sourceId: "demo_sales",
+    tableName: "sales",
+    metrics: [],
+    dimensions: [],
+  };
+  const bodies: Record<string, unknown>[] = [];
+  api.mockImplementation(async (path, init) => {
+    if (path === "/datasets") return [dataset];
+    if (path === "/queries") {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return {
+        id: `run-${bodies.length}`,
+        conversationId: body.conversationId ?? "conversation-1",
+        datasetId: "sales",
+        columns: [],
+        rows: [],
+        steps: [],
+        question: body.question,
+        status: "SUCCEEDED",
+        mode: body.mode,
+      };
+    }
+    return {};
+  });
+  await vm.loadBase();
+  vm.mode = "agent";
+  await flushPromises();
+  vm.question = "各区域销售额";
+  await vm.ask();
+  vm.question = "那利润呢";
+  await vm.ask();
+  expect(bodies[0]!.conversationId).toBeUndefined();
+  expect(bodies[1]!.conversationId).toBe("conversation-1");
+  expect(vm.conversationTurns).toEqual(["各区域销售额", "那利润呢"]);
+  expect(wrapper.find(".conversation-strip").text()).toContain("已进行 2 轮");
+
+  vm.mode = "demo";
+  await flushPromises();
+  expect(vm.conversationId).toBe("");
+  vm.question = "各区域销售额";
+  await vm.ask();
+  expect(bodies[2]!.conversationId).toBeUndefined();
+
+  vm.mode = "agent";
+  vm.question = "各区域销售额";
+  await vm.ask();
+  vm.newConversation();
+  vm.question = "各品类利润";
+  await vm.ask();
+  expect(bodies[4]!.conversationId).toBeUndefined();
+});
+it("offers Ollama without an API key and fills its local address", async () => {
+  await start();
+  const vm = state();
+  vm.page = "settings";
+  await flushPromises();
+  const labels = () =>
+    wrapper
+      .findAll(".settings-card .el-form-item__label")
+      .map((label) => label.text());
+  expect(labels()).toContain("API Key");
+  vm.model.provider = "OLLAMA";
+  await flushPromises();
+  expect(vm.model.baseUrl).toBe("http://127.0.0.1:11434");
+  expect(labels()).not.toContain("API Key");
+  vm.model.baseUrl = "http://gpu-box:11434";
+  vm.model.provider = "OPENAI_COMPATIBLE";
+  await flushPromises();
+  expect(vm.model.baseUrl).toBe("http://gpu-box:11434");
+});

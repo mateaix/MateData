@@ -5,7 +5,7 @@ import static org.mockito.Mockito.*;
 
 import io.matedata.conversation.*;
 import io.matedata.conversation.application.QueryService;
-import io.matedata.harness.QueryPlanner;
+import io.matedata.harness.QueryAgent;
 import io.matedata.identity.*;
 import io.matedata.identity.application.DataAccessService;
 import io.matedata.semantic.*;
@@ -45,7 +45,7 @@ class HistoryPageTest {
     when(runs.page("alice", 0, 2)).thenReturn(List.of(revoked, revoked));
     when(runs.page("alice", 2, 2)).thenReturn(List.of(allowed));
     var service =
-        new QueryService(models, runs, mock(QueryPlanner.class), mock(QueryExecutor.class), access);
+        new QueryService(models, runs, mock(QueryAgent.class), mock(QueryExecutor.class), access);
     var first = service.historyPage("alice", 0, 2);
     assertThat(first.items()).isEmpty();
     assertThat(first.nextOffset()).isEqualTo(2);

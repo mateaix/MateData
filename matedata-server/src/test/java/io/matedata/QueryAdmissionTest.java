@@ -6,7 +6,7 @@ import static org.mockito.Mockito.*;
 
 import io.matedata.conversation.*;
 import io.matedata.conversation.application.QueryService;
-import io.matedata.harness.QueryPlanner;
+import io.matedata.harness.QueryAgent;
 import io.matedata.identity.*;
 import io.matedata.identity.application.DataAccessService;
 import io.matedata.semantic.*;
@@ -34,14 +34,17 @@ class QueryAdmissionTest {
     var f = fixture(mock(GrantRepository.class), "ADMIN");
     var entered = new CountDownLatch(8);
     var release = new CountDownLatch(1);
-    var agent = mock(QueryPlanner.class);
-    when(agent.plan(anyString(), any(), anyString(), anyString(), any()))
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
         .thenAnswer(
             invocation -> {
               entered.countDown();
               if (!release.await(5, TimeUnit.SECONDS))
                 throw new IllegalArgumentException("test deadline");
-              return new QueryPlan("revenue", "region", Map.of(), 10);
+              invocation
+                  .<QueryAgent.GovernedQuery>getArgument(1)
+                  .run(new QueryPlan("revenue", "region", Map.of(), 10));
+              return new QueryAgent.Reply("");
             });
     var executor = mock(QueryExecutor.class);
     when(executor.execute(any(), any(), any()))
@@ -91,7 +94,7 @@ class QueryAdmissionTest {
                   List.of(Map.of("region", "restricted-result-value", "revenue", 99)));
             });
     var service =
-        new QueryService(f.models(), f.runs(), mock(QueryPlanner.class), executor, f.access());
+        new QueryService(f.models(), f.runs(), mock(QueryAgent.class), executor, f.access());
     var result = service.ask("alice", "各区域销售额", "sales", "demo", null);
     assertThat(result.status()).isEqualTo("FAILED");
     assertThat(result.rows()).isEmpty();
@@ -113,14 +116,113 @@ class QueryAdmissionTest {
                     List.of("region"),
                     Map.of("region", "华东"))));
     var f = fixture(grants, "ANALYST");
-    var agent = mock(QueryPlanner.class);
-    when(agent.plan(anyString(), any(), anyString(), anyString(), any()))
-        .thenReturn(new QueryPlan("revenue", null, Map.of("region", "华南"), 10));
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
+        .thenAnswer(
+            invocation ->
+                invocation
+                    .<QueryAgent.GovernedQuery>getArgument(1)
+                    .run(new QueryPlan("revenue", null, Map.of("region", "华南"), 10)));
     var executor = mock(QueryExecutor.class);
     var service = new QueryService(f.models(), f.runs(), agent, executor, f.access());
     var result = service.ask("alice", "华南销售额", "sales", "agent", null);
     assertThat(result.status()).isEqualTo("FAILED");
     assertThat(result.error()).isEqualTo("查询筛选与行级授权冲突");
     verify(executor, never()).execute(any(), any(), any());
+  }
+
+  QueryService agentService(Fixture f, QueryAgent agent) throws Exception {
+    var executor = mock(QueryExecutor.class);
+    when(executor.execute(any(), any(), any()))
+        .thenReturn(
+            new QueryExecutor.Result(
+                List.of("region", "revenue"), List.of(Map.of("region", "华东", "revenue", 1))));
+    return new QueryService(f.models(), f.runs(), agent, executor, f.access());
+  }
+
+  @Test
+  void agentReplyBecomesTheAnswerAndRowsComeFromTheGovernedQuery() throws Exception {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              var rows =
+                  invocation
+                      .<QueryAgent.GovernedQuery>getArgument(1)
+                      .run(new QueryPlan("revenue", "region", Map.of(), 10));
+              assertThat(rows.rows()).hasSize(1);
+              return new QueryAgent.Reply("华东最高");
+            });
+    var run = agentService(f, agent).ask("alice", "各区域销售额", "sales", "agent", null);
+    assertThat(run.status()).isEqualTo("SUCCEEDED");
+    assertThat(run.answer()).isEqualTo("华东最高");
+    assertThat(run.sql()).contains("GROUP BY region");
+    assertThat(run.rows()).hasSize(1);
+  }
+
+  @Test
+  void agentThatNeverQueriesCannotProduceASuccess() throws Exception {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any())).thenReturn(new QueryAgent.Reply("你想按哪个维度查看利润？"));
+    var service = agentService(f, agent);
+    var clarification = service.ask("alice", "利润", "sales", "agent", null);
+    assertThat(clarification.status()).isEqualTo("NEEDS_INPUT");
+    assertThat(clarification.answer()).isEqualTo("你想按哪个维度查看利润？");
+    assertThat(clarification.rows()).isEmpty();
+    assertThat(clarification.sql()).isEmpty();
+
+    when(agent.answer(any(), any(), any())).thenReturn(new QueryAgent.Reply(""));
+    var silent = service.ask("alice", "利润", "sales", "agent", null);
+    assertThat(silent.status()).isEqualTo("FAILED");
+    assertThat(silent.error()).contains("未执行查询");
+  }
+
+  @Test
+  void followUpsKeepTheirSessionUntilTheAuthorizationScopeChanges() throws Exception {
+    var current =
+        new AtomicReference<>(
+            new DatasetGrant(
+                "alice", "sales", true, List.of("revenue"), List.of("region"), Map.of()));
+    var grants = mock(GrantRepository.class);
+    when(grants.find("alice", "sales")).thenAnswer(invocation -> Optional.of(current.get()));
+    var f = fixture(grants, "ANALYST");
+    var sessions = new ArrayList<String>();
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              sessions.add(invocation.<QueryAgent.Turn>getArgument(0).sessionKey());
+              invocation
+                  .<QueryAgent.GovernedQuery>getArgument(1)
+                  .run(new QueryPlan("revenue", "region", Map.of(), 10));
+              return new QueryAgent.Reply("");
+            });
+    var service = agentService(f, agent);
+    service.ask("alice", "各区域销售额", "sales", "agent", "conversation-1");
+    service.ask("alice", "那华东呢", "sales", "agent", "conversation-1");
+    service.ask("alice", "各区域销售额", "sales", "agent", "conversation-2");
+    current.set(
+        new DatasetGrant(
+            "alice", "sales", true, List.of("revenue"), List.of("region"), Map.of("region", "华东")));
+    service.ask("alice", "各区域销售额", "sales", "agent", "conversation-1");
+    assertThat(sessions.get(1)).isEqualTo(sessions.get(0));
+    assertThat(sessions.get(2)).isNotEqualTo(sessions.get(0));
+    assertThat(sessions.get(3)).isNotEqualTo(sessions.get(0));
+    assertThat(sessions).allMatch(key -> key.matches("c[0-9a-f]{32}"));
+  }
+
+  @Test
+  void conversationIdsAreValidatedBeforeAnyWork() {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    var service =
+        new QueryService(
+            f.models(), f.runs(), mock(QueryAgent.class), mock(QueryExecutor.class), f.access());
+    for (String id : List.of("../escape", "a".repeat(65), "", "with space"))
+      assertThatThrownBy(() -> service.ask("alice", "各区域销售额", "sales", "demo", id))
+          .as(id)
+          .isInstanceOf(IllegalArgumentException.class);
+    verifyNoInteractions(f.runs());
   }
 }

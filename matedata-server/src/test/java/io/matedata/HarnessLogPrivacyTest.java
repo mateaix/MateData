@@ -3,8 +3,9 @@ package io.matedata;
 import static org.assertj.core.api.Assertions.*;
 
 import com.sun.net.httpserver.HttpServer;
+import io.matedata.harness.QueryAgent;
 import io.matedata.harness.application.ModelSettings;
-import io.matedata.harness.infrastructure.AgentScopeQueryPlanner;
+import io.matedata.harness.infrastructure.AgentScopeQueryAgent;
 import io.matedata.semantic.SemanticModel;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -25,7 +26,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 @ExtendWith(OutputCaptureExtension.class)
 class HarnessLogPrivacyTest {
   @Autowired ModelSettings settings;
-  @Autowired AgentScopeQueryPlanner planner;
+  @Autowired AgentScopeQueryAgent planner;
 
   @Test
   void providerErrorPayloadsNeverReachApplicationLogs(CapturedOutput output) throws Exception {
@@ -51,7 +52,14 @@ class HarnessLogPrivacyTest {
           1,
           5);
       assertThatThrownBy(
-              () -> planner.plan("各区域销售额", SemanticModel.sales(), "admin", "privacy-run"))
+              () ->
+                  planner.answer(
+                      new QueryAgent.Turn(
+                          "各区域销售额", SemanticModel.sales(), "admin", "privacy-run", "privacy"),
+                      plan -> {
+                        throw new AssertionError("governed query must not run");
+                      },
+                      step -> {}))
           .isInstanceOf(IllegalArgumentException.class);
       assertThat(output.getAll()).doesNotContain(marker, "private-test-key");
     } finally {

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { chartUnavailableReason, isNumericCell } from "../chart";
 import { runMatchesDataset } from "../modelVersions";
+import { runStatus } from "../runStatus";
 import type { Run, Dataset } from "../types";
 const props = defineProps<{ run: Run; dataset?: Dataset }>();
 const tab = ref("result");
@@ -51,8 +52,8 @@ function format(value: unknown) {
         <span class="eyebrow">ANALYSIS RESULT</span>
         <h2>{{ run.question }}</h2>
       </div>
-      <el-tag :type="run.status === 'SUCCEEDED' ? 'success' : 'danger'">{{
-        run.status === "SUCCEEDED" ? "已完成" : "执行失败"
+      <el-tag :type="runStatus(run.status).type">{{
+        runStatus(run.status).label
       }}</el-tag>
     </div>
     <div class="run-meta">
@@ -73,7 +74,15 @@ function format(value: unknown) {
       :closable="false"
       show-icon
     />
-    <p v-if="run.answer" class="answer">{{ run.answer }}</p>
+    <div v-if="run.answer" class="answer">
+      <span v-if="run.mode === 'agent'" class="answer-label"
+        >{{ run.status === "NEEDS_INPUT" ? "智能体需要确认" : "智能体解读"
+        }}<small v-if="run.status === 'SUCCEEDED'"
+          >由模型根据查询结果生成，数值以下方结果表为准</small
+        ></span
+      >
+      <p>{{ run.answer }}</p>
+    </div>
     <el-tabs v-model="tab"
       ><el-tab-pane label="分析结果" name="result">
         <el-alert

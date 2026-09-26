@@ -44,7 +44,8 @@ export interface Run {
   question: string;
   datasetId: string;
   mode: string;
-  status: string;
+  /** NEEDS_INPUT: the agent asked a clarifying question instead of querying. */
+  status: "SUCCEEDED" | "FAILED" | "NEEDS_INPUT" | string;
   sql: string;
   columns: string[];
   rows: Record<string, unknown>[];
@@ -55,7 +56,9 @@ export interface Run {
   error: string | null;
   steps: { name: string; status: string; detail: string; durationMs: number }[];
 }
+export type ModelProvider = "OPENAI_COMPATIBLE" | "OLLAMA";
 export interface Model {
+  provider: ModelProvider;
   baseUrl: string;
   model: string;
   configured: boolean;
