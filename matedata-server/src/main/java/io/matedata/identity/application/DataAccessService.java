@@ -98,6 +98,16 @@ public class DataAccessService {
         requested.metric(), requested.dimension(), filters, requested.limit(), requested.sort());
   }
 
+  /**
+   * A values lookup is limited to granted dimensions and always carries the user's row filters, so
+   * it can only reveal values from rows the user may already query.
+   */
+  public ValuesPlan constrainValues(SemanticModel full, DatasetGrant grant, ValuesPlan requested) {
+    restrict(full, grant).dimension(requested.dimension());
+    return new ValuesPlan(
+        requested.dimension(), requested.keyword(), grant.rowFilters(), requested.limit());
+  }
+
   public List<DatasetGrant> all() {
     return grants.all();
   }

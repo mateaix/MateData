@@ -9,6 +9,7 @@ import io.matedata.harness.QueryAgent;
 import io.matedata.harness.infrastructure.AgentScopeQueryAgent;
 import io.matedata.semantic.QueryPlan;
 import io.matedata.semantic.SemanticModel;
+import io.matedata.semantic.ValuesPlan;
 import io.matedata.shared.ApplicationException;
 import java.math.BigDecimal;
 import java.nio.file.Path;
@@ -27,14 +28,13 @@ class AgentScopeHarnessTest {
               Map.of("region", "华东", "revenue", new BigDecimal("1449000.00")),
               Map.of("region", "西部", "revenue", new BigDecimal("1114200.00"))));
 
-  /** list_metrics → list_dimensions → run_query → interpretation, as a well-behaved model. */
+  /** describe_dataset → run_query → interpretation, as a well-behaved model. */
   static Script fullFlow(FakeModelServer[] self) {
     return (request, call) -> {
       int toolResults = toolResultsThisTurn(request);
       return switch (toolResults) {
-        case 0 -> self[0].toolCall("call_m", "list_metrics", Map.of());
-        case 1 -> self[0].toolCall("call_d", "list_dimensions", Map.of());
-        case 2 ->
+        case 0 -> self[0].toolCall("call_d", "describe_dataset", Map.of());
+        case 1 ->
             self[0].toolCall(
                 "call_q",
                 "run_query",
@@ -79,7 +79,8 @@ class AgentScopeHarnessTest {
         request
             .path("tools")
             .forEach(tool -> names.add(tool.path("function").path("name").asText()));
-        assertThat(names).containsExactlyInAnyOrder("list_metrics", "list_dimensions", "run_query");
+        assertThat(names)
+            .containsExactlyInAnyOrder("describe_dataset", "list_dimension_values", "run_query");
       }
       // The model sees business vocabulary and governed rows, never physical names or secrets.
       String sent = server.requests.toString();
@@ -207,7 +208,7 @@ class AgentScopeHarnessTest {
             (request, call) ->
                 call == 1
                     ? holder[0].toolCall("q", "run_query", query("region", null))
-                    : holder[0].toolCall("m", "list_metrics", Map.of()));
+                    : holder[0].toolCall("m", "describe_dataset", Map.of()));
     try (var server = holder[0]) {
       var agent = new AgentScopeQueryAgent(server.settings(dir, 3, 15), dir.toString());
       var plans = new CopyOnWriteArrayList<QueryPlan>();
@@ -277,15 +278,17 @@ class AgentScopeHarnessTest {
     }
     try (var server = queryThen(query("region", "cheapest_first"), "无法回答")) {
       var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
-      var reply =
-          agent.answer(
-              turn("销售额最低的两个区域", "invalid-sort"),
-              plan -> {
-                throw new AssertionError("an invalid sort must be rejected before data access");
-              },
-              step -> {});
-      assertThat(reply.answer()).isEqualTo("无法回答");
-      assertThat(server.requests.get(1).toString()).contains("查询被拒绝");
+      assertThatThrownBy(
+              () ->
+                  agent.answer(
+                      turn("销售额最低的两个区域", "invalid-sort"),
+                      plan -> {
+                        throw new AssertionError(
+                            "an invalid sort must be rejected before data access");
+                      },
+                      step -> {}))
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(server.requests.get(1).toString()).contains("查询被拒绝", "sort 只能是");
     }
   }
 
@@ -373,6 +376,210 @@ class AgentScopeHarnessTest {
     assertThat(older.getId()).isEqualTo("call-1");
     var twoQuestions = messages.subList(0, 4);
     assertThat(AgentScopeQueryAgent.forModel(twoQuestions)).isSameAs(twoQuestions);
+  }
+
+  /** A governed query that answers lookups from a fixed list and records what was asked. */
+  static final class RecordingQuery implements QueryAgent.GovernedQuery {
+    final List<ValuesPlan> lookups = new CopyOnWriteArrayList<>();
+    final List<QueryPlan> plans = new CopyOnWriteArrayList<>();
+    final List<String> values;
+    final boolean scoped;
+
+    RecordingQuery(List<String> values, boolean scoped) {
+      this.values = values;
+      this.scoped = scoped;
+    }
+
+    @Override
+    public QueryAgent.Rows run(QueryPlan plan) {
+      plans.add(plan);
+      return REGION_ROWS;
+    }
+
+    @Override
+    public QueryAgent.Values values(ValuesPlan plan) {
+      lookups.add(plan);
+      return new QueryAgent.Values(values, false, scoped);
+    }
+  }
+
+  /** Looks up region values for "华东", then filters on the value the lookup returned. */
+  FakeModelServer groundedFilter(Map<String, Object> lookup) throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE,
+            (request, call) ->
+                switch (toolResultsThisTurn(request)) {
+                  case 0 -> holder[0].toolCall("v", "list_dimension_values", lookup);
+                  case 1 ->
+                      holder[0].toolCall(
+                          "q",
+                          "run_query",
+                          Map.of(
+                              "metric",
+                              "revenue",
+                              "dimension",
+                              "",
+                              "filtersJson",
+                              "{\"region\":\"华东\"}",
+                              "limit",
+                              10));
+                  default -> text("华东销售额为 1449000.00");
+                });
+    return holder[0];
+  }
+
+  @Test
+  void theAgentGroundsFiltersInLookedUpDimensionValues() throws Exception {
+    try (var server = groundedFilter(Map.of("dimension", "region", "keyword", "华东"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var query = new RecordingQuery(List.of("华东", "华东区"), true);
+      var steps = new CopyOnWriteArrayList<ExecutionStep>();
+      var reply = agent.answer(turn("华东区的销售额", "grounded"), query, steps::add);
+      assertThat(reply.answer()).contains("华东");
+      assertThat(query.lookups).containsExactly(new ValuesPlan("region", "华东", Map.of(), 20));
+      assertThat(query.plans)
+          .containsExactly(new QueryPlan("revenue", "", Map.of("region", "华东"), 10));
+      var lookupResult = messages(server.requests.get(1), "tool").getLast().toString();
+      assertThat(lookupResult).contains("华东区", "数据权限");
+    }
+  }
+
+  @Test
+  void invalidOrUnsupportedLookupsNeverTouchData() throws Exception {
+    for (var lookup :
+        List.of(
+            Map.<String, Object>of("dimension", "secret_dimension"),
+            Map.<String, Object>of("dimension", "region", "limit", 51))) {
+      try (var server = groundedFilter(lookup)) {
+        var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+        var query = new RecordingQuery(List.of("华东"), false);
+        agent.answer(turn("华东区的销售额", "rejected-" + lookup.size()), query, step -> {});
+        assertThat(query.lookups).isEmpty();
+        assertThat(server.requests.get(1).toString()).contains("维度值查询被拒绝");
+        // The question itself can still be answered.
+        assertThat(query.plans).hasSize(1);
+      }
+    }
+    // A caller without lookup support fails the lookup, not the question.
+    try (var server = groundedFilter(Map.of("dimension", "region"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      agent.answer(
+          turn("华东区的销售额", "unsupported"),
+          plan -> {
+            plans.add(plan);
+            return REGION_ROWS;
+          },
+          step -> {});
+      assertThat(server.requests.get(1).toString()).contains("维度值查询失败");
+      assertThat(plans).hasSize(1);
+    }
+  }
+
+  @Test
+  void anEmptyLookupTellsTheModelTheValueDoesNotExist() throws Exception {
+    try (var server = groundedFilter(Map.of("dimension", "region", "keyword", "东北"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      agent.answer(turn("东北的销售额", "missing"), new RecordingQuery(List.of(), false), step -> {});
+      assertThat(messages(server.requests.get(1), "tool").getLast().toString())
+          .contains("没有匹配的取值")
+          .doesNotContain("数据权限");
+    }
+  }
+
+  @Test
+  void aRevokedScopeDuringALookupStopsTheQuestion() throws Exception {
+    try (var server = groundedFilter(Map.of("dimension", "region"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      var plans = new CopyOnWriteArrayList<QueryPlan>();
+      var revoked =
+          new QueryAgent.GovernedQuery() {
+            @Override
+            public QueryAgent.Rows run(QueryPlan plan) {
+              plans.add(plan);
+              return REGION_ROWS;
+            }
+
+            @Override
+            public QueryAgent.Values values(ValuesPlan plan) {
+              throw new ApplicationException(
+                  ApplicationException.Kind.FORBIDDEN, "数据权限或语义模型已变更，请重新查询");
+            }
+          };
+      assertThatThrownBy(() -> agent.answer(turn("华东区的销售额", "revoked-lookup"), revoked, step -> {}))
+          .isInstanceOf(ApplicationException.class);
+      assertThat(plans).isEmpty();
+    }
+  }
+
+  @Test
+  void overEscapedFiltersAreAcceptedAndMalformedOnesExplainThemselves() {
+    assertThat(AgentScopeQueryAgent.filters("{\\\"region\\\":\\\"华东\\\"}"))
+        .containsExactly(Map.entry("region", "华东"));
+    assertThat(AgentScopeQueryAgent.filters("{\"region\":\"华东\"}"))
+        .containsExactly(Map.entry("region", "华东"));
+    assertThat(AgentScopeQueryAgent.filters(" ")).isEmpty();
+    for (String malformed : List.of("region=华东", "[\"华东\"]", "{\"region\":null}"))
+      assertThatThrownBy(() -> AgentScopeQueryAgent.filters(malformed))
+          .as(malformed)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("filtersJson");
+  }
+
+  @Test
+  void aFailedQueryAttemptCanNeverEndInAnInventedAnswer() throws Exception {
+    var holder = new FakeModelServer[1];
+    holder[0] =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE,
+            (request, call) ->
+                toolResultsThisTurn(request) == 0
+                    ? holder[0].toolCall(
+                        "q",
+                        "run_query",
+                        Map.of(
+                            "metric", "gross_margin",
+                            "dimension", "region",
+                            "filtersJson", "{}",
+                            "limit", 10))
+                    : text("华东区的销售额是 12000000。"));
+    try (var server = holder[0]) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      assertThatThrownBy(
+              () ->
+                  agent.answer(
+                      turn("华东区的毛利", "invented"),
+                      plan -> {
+                        throw new AssertionError("an unknown metric must not reach data");
+                      },
+                      step -> {}))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("已拦截")
+          .hasMessageNotContaining("12000000");
+      // The model was told exactly what was wrong.
+      assertThat(server.requests.get(1).toString()).contains("未知指标：gross_margin");
+    }
+  }
+
+  @Test
+  void numbersWithoutAnyQueryAreBlockedButQuestionsPass() throws Exception {
+    try (var server =
+        new FakeModelServer(
+            Protocol.OPENAI_COMPATIBLE, (request, call) -> text("华东销售额约为 1200 万。"))) {
+      var agent = new AgentScopeQueryAgent(server.settings(dir, 6, 15), dir.toString());
+      assertThatThrownBy(
+              () ->
+                  agent.answer(
+                      turn("华东销售额", "no-query-number"),
+                      plan -> {
+                        throw new AssertionError("not called");
+                      },
+                      step -> {}))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("已拦截");
+    }
   }
 
   @Test

@@ -103,6 +103,16 @@ public class JdbcQueryExecutor implements QueryExecutor {
   public Result execute(SemanticModel model, QueryPlan plan, CompiledQuery query)
       throws SQLException {
     new SqlGuard().verify(query, model, plan);
+    return run(model, query, Math.min(plan.limit(), 1000));
+  }
+
+  public Result values(SemanticModel model, ValuesPlan plan, CompiledQuery query)
+      throws SQLException {
+    new SqlGuard().verifyValues(query, model, plan);
+    return run(model, query, plan.limit() + 1);
+  }
+
+  private Result run(SemanticModel model, CompiledQuery query, int maxRows) throws SQLException {
     var source = catalog.require(model.sourceId());
     try (var c = connections.open(source)) {
       // pgJDBC needs a transaction for cursor fetching; closing this dedicated connection
@@ -116,7 +126,7 @@ public class JdbcQueryExecutor implements QueryExecutor {
         if (source.type().equals("POSTGRESQL")) s.setFetchSize(64);
         if (source.type().equals("MYSQL")) s.setFetchSize(Integer.MIN_VALUE);
         s.setQueryTimeout(10);
-        s.setMaxRows(Math.min(plan.limit(), 1000));
+        s.setMaxRows(maxRows);
         for (int i = 0; i < query.parameters().size(); i++)
           s.setObject(i + 1, query.parameters().get(i));
         try (var rs = s.executeQuery()) {

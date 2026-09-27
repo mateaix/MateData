@@ -54,7 +54,8 @@ public class AgentScopeQueryAgent implements QueryAgent {
   static final int MAX_ANSWER_CHARS = 2000;
   static final int MAX_ROWS_FOR_MODEL = 30;
   static final int MAX_RESULT_CHARS = 4000;
-  static final List<String> TOOL_NAMES = List.of("list_metrics", "list_dimensions", "run_query");
+  static final List<String> TOOL_NAMES =
+      List.of("describe_dataset", "list_dimension_values", "run_query");
 
   /** Questions whose tool results the model still sees verbatim, including the current one. */
   static final int RECENT_TURNS = 2;
@@ -183,6 +184,11 @@ public class AgentScopeQueryAgent implements QueryAgent {
       if (!tools.executed()) {
         if (exhausted.get()) throw new IllegalArgumentException("模型超过最大执行步数，请明确问题后重试");
         if (reply.get().isBlank()) throw new IllegalArgumentException("智能体未执行查询，请明确要分析的指标和维度后重试");
+        // Without governed rows, any conclusion is invented: only questions and refusals pass.
+        if (tools.attempted())
+          throw new IllegalArgumentException("智能体生成的查询未通过平台校验，已拦截其回答；请换个说法或明确指标、维度后重试");
+        if (reply.get().chars().anyMatch(Character::isDigit))
+          throw new IllegalArgumentException("智能体未执行查询却给出了数值，已拦截该回答；请明确指标和维度后重试");
         // A clarifying question or a refusal: returned as text, never as data.
         observer.accept(
             new ExecutionStep(
@@ -278,16 +284,18 @@ public class AgentScopeQueryAgent implements QueryAgent {
 
   static String prompt(SemanticModel model) {
     return "你是 MateData 的企业问数智能体，只能通过工具获取数据。\n"
-        + "1. 先调用 list_metrics 和 list_dimensions，了解当前用户已授权的指标与维度；只能使用返回的 id。\n"
-        + "2. 调用 run_query 执行一次受治理查询：选择一个指标，至多一个分组维度；过滤条件只支持维度的等值筛选。"
+        + "1. 先调用 describe_dataset，了解当前用户已授权的指标与维度；只能使用返回的 id。\n"
+        + "2. 用户提到具体的筛选值（如地区、品类、渠道名称），而你不确定数据中的准确写法时，"
+        + "先调用 list_dimension_values 查询实际取值，再用准确的取值筛选；取值不存在时如实告诉用户，不要改用相近的值。\n"
+        + "3. 调用 run_query 执行一次受治理查询：选择一个指标，至多一个分组维度；过滤条件只支持维度的等值筛选。"
         + "问“最低、最少、倒数”时 sort 用 metric_asc，问“最近 N 期”时 sort 用 dimension_desc，其余情况留空。"
         + "SQL 由平台生成并校验，你不能也不需要编写 SQL。\n"
-        + "3. 根据 run_query 返回的数据，用简洁的中文回答问题：给出结论，引用具体数值，指出最高、最低或明显差异。"
+        + "4. 根据 run_query 返回的数据，用简洁的中文回答问题：给出结论，引用具体数值，指出最高、最低或明显差异。"
         + "不得编造数据中没有的数值或原因。结果若注明已按数据权限限定，要说明结论只针对用户有权查看的范围，不要推断范围外的数据。"
         + "使用普通文本和换行，不要使用 Markdown 格式。\n"
-        + "4. 追问时结合之前的对话：省略的指标、维度和筛选条件沿用上一轮查询，只替换用户提到的部分，然后重新调用 run_query。"
+        + "5. 追问时结合之前的对话：省略的指标、维度和筛选条件沿用上一轮查询，只替换用户提到的部分，然后重新调用 run_query。"
         + "例如上一轮按区域查销售额，追问“那利润呢”就按区域查利润。\n"
-        + "5. 只有在确实无法判断用户意图时，才用一句话向用户确认，此时不要调用 run_query。"
+        + "6. 只有在确实无法判断用户意图时，才用一句话向用户确认，此时不要调用 run_query。"
         + "若问题与当前数据集无关，或现有指标无法回答，直接说明原因。\n"
         + "当前数据集："
         + model.name()
@@ -307,9 +315,35 @@ public class AgentScopeQueryAgent implements QueryAgent {
   }
 
   static QueryPlan.Sort sort(String value) {
-    return value == null || value.isBlank()
-        ? null
-        : QueryPlan.Sort.valueOf(value.strip().toUpperCase(Locale.ROOT));
+    if (value == null || value.isBlank()) return null;
+    try {
+      return QueryPlan.Sort.valueOf(value.strip().toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(
+          "sort 只能是 metric_desc、metric_asc、dimension_asc 或 dimension_desc，或留空");
+    }
+  }
+
+  private static final ObjectMapper FILTERS = new ObjectMapper();
+
+  /**
+   * Parses the equality filters. Models often escape the quotes of this string argument once more
+   * than needed ({@code {\"region\":\"华东\"}}); one extra layer is tolerated.
+   */
+  public static Map<String, String> filters(String json) {
+    if (json == null || json.isBlank()) return Map.of();
+    if (json.length() > 2000) throw new IllegalArgumentException("过滤条件过长");
+    var type = new TypeReference<Map<String, String>>() {};
+    for (String candidate : List.of(json, json.replace("\\\"", "\""))) {
+      try {
+        var filters = FILTERS.readValue(candidate, type);
+        if (filters == null || filters.containsValue(null)) break;
+        return filters;
+      } catch (com.fasterxml.jackson.core.JacksonException e) {
+        // Try the next candidate.
+      }
+    }
+    throw new IllegalArgumentException("filtersJson 必须是维度 id 到取值的 JSON 对象，例如 {\"region\":\"华东\"}");
   }
 
   /**
@@ -371,12 +405,18 @@ public class AgentScopeQueryAgent implements QueryAgent {
     private final GovernedQuery query;
     private final Consumer<ExecutionStep> observer;
     private final AtomicBoolean executed = new AtomicBoolean();
+    private final AtomicBoolean attempted = new AtomicBoolean();
     private final AtomicReference<RuntimeException> fatal = new AtomicReference<>();
 
     SemanticTools(SemanticModel model, GovernedQuery query, Consumer<ExecutionStep> observer) {
       this.model = model;
       this.query = query;
       this.observer = observer;
+    }
+
+    /** The model called run_query at least once, whether or not it succeeded. */
+    boolean attempted() {
+      return attempted.get();
     }
 
     boolean executed() {
@@ -391,8 +431,10 @@ public class AgentScopeQueryAgent implements QueryAgent {
       if (fatal.get() != null) throw fatal.get();
     }
 
-    @Tool(name = "list_metrics", description = "列出当前用户可查询的业务指标：id、名称、别名和聚合方式。")
-    public String listMetrics() {
+    @Tool(
+        name = "describe_dataset",
+        description = "列出当前用户在本数据集中已授权的指标（id、名称、别名、聚合方式）和维度（id、名称、别名、取值类型，日期使用 ISO 格式）。")
+    public String describeDataset() {
       long start = System.nanoTime();
       var metrics =
           model.metrics().stream()
@@ -404,15 +446,6 @@ public class AgentScopeQueryAgent implements QueryAgent {
                           "aliases", m.aliases(),
                           "aggregation", m.aggregation()))
               .toList();
-      observer.accept(
-          new ExecutionStep(
-              "语义工具", "SUCCEEDED", "list_metrics：" + metrics.size() + " 个已授权指标", elapsed(start)));
-      return write(metrics);
-    }
-
-    @Tool(name = "list_dimensions", description = "列出当前用户可用于分组或筛选的维度：id、名称、别名和取值类型（日期使用 ISO 格式）。")
-    public String listDimensions() {
-      long start = System.nanoTime();
       var dimensions =
           model.dimensions().stream()
               .map(
@@ -427,9 +460,63 @@ public class AgentScopeQueryAgent implements QueryAgent {
           new ExecutionStep(
               "语义工具",
               "SUCCEEDED",
-              "list_dimensions：" + dimensions.size() + " 个已授权维度",
+              "describe_dataset：" + metrics.size() + " 个已授权指标，" + dimensions.size() + " 个已授权维度",
               elapsed(start)));
-      return write(dimensions);
+      var result = new LinkedHashMap<String, Object>();
+      result.put("dataset", model.name());
+      result.put("metrics", metrics);
+      result.put("dimensions", dimensions);
+      return write(result);
+    }
+
+    @Tool(
+        name = "list_dimension_values",
+        description =
+            "查询某个已授权维度在数据中实际存在的取值（升序，最多 50 个），用于确认筛选值的准确写法。"
+                + "keyword 可选，只对文本维度按包含关系匹配。每个问题最多调用 3 次。")
+    public String listDimensionValues(
+        @ToolParam(name = "dimension", description = "维度 id") String dimension,
+        @ToolParam(name = "keyword", description = "可选，取值包含的文字，例如“华东”", required = false)
+            String keyword,
+        @ToolParam(name = "limit", description = "可选，返回数量 1–50，默认 20", required = false)
+            Integer limit) {
+      long start = System.nanoTime();
+      if (fatal.get() != null) return "查询已终止：数据权限或语义模型已变更。请停止调用工具。";
+      ValuesPlan plan;
+      try {
+        model.dimension(dimension);
+        plan = new ValuesPlan(dimension, keyword, Map.of(), limit == null ? 20 : limit);
+        // Validate against the permitted vocabulary before touching any data.
+        new SemanticCompiler().compileValues(model, plan);
+      } catch (Exception e) {
+        observer.accept(
+            new ExecutionStep("语义工具", "FAILED", "list_dimension_values：请求被校验器拒绝", elapsed(start)));
+        return "维度值查询被拒绝：请使用 describe_dataset 返回的维度 id；keyword 只适用于文本维度，limit 为 1–50。";
+      }
+      try {
+        var found = query.values(plan);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("dimension", dimension);
+        result.put("values", found.values());
+        if (found.values().isEmpty()) result.put("note", "没有匹配的取值，请如实告诉用户数据中不存在该取值");
+        else if (found.truncated())
+          result.put("note", "取值较多，仅返回前 " + found.values().size() + " 个，可用 keyword 缩小范围");
+        if (found.rowScoped()) result.put("scope", "取值已按当前用户的数据权限做行级限定");
+        return write(result);
+      } catch (ApplicationException e) {
+        if (e.kind() == ApplicationException.Kind.FORBIDDEN) {
+          fatal.compareAndSet(null, e);
+          return "查询已终止：" + e.getMessage();
+        }
+        return "维度值查询失败：" + e.getMessage();
+      } catch (IllegalArgumentException e) {
+        return "维度值查询失败：" + e.getMessage();
+      } catch (RuntimeException e) {
+        // A failed lookup only loses grounding; the question can still be answered.
+        observer.accept(
+            new ExecutionStep("维度值查询", "FAILED", "list_dimension_values：数据源查询失败", elapsed(start)));
+        return "维度值查询失败，请直接使用用户问题中的写法筛选。";
+      }
     }
 
     @Tool(
@@ -454,20 +541,21 @@ public class AgentScopeQueryAgent implements QueryAgent {
       long start = System.nanoTime();
       if (fatal.get() != null) return "查询已终止：数据权限或语义模型已变更。请停止调用工具。";
       if (executed.get()) return "本问题已完成查询，请直接根据已有结果回答，不要再次调用 run_query。";
+      attempted.set(true);
       QueryPlan plan;
       try {
-        if (filtersJson == null || filtersJson.length() > 2000)
-          throw new IllegalArgumentException("过滤条件过长");
-        Map<String, String> filters =
-            filtersJson.isBlank()
-                ? Map.of()
-                : JSON.readValue(filtersJson, new TypeReference<>() {});
-        plan = new QueryPlan(metric, dimension, filters, limit, sort(sort));
+        plan = new QueryPlan(metric, dimension, filters(filtersJson), limit, sort(sort));
         // Validate against the permitted vocabulary before touching any data.
         new SqlGuard().verify(new SemanticCompiler().compile(model, plan), model, plan);
       } catch (Exception e) {
         observer.accept(new ExecutionStep("语义工具", "FAILED", "run_query：计划被校验器拒绝", elapsed(start)));
-        return "查询被拒绝：请只使用 list_metrics / list_dimensions 返回的 id，并检查过滤值与结果上限。";
+        // Compiler messages name only the model's own ids and values, so the model can
+        // self-correct.
+        return "查询被拒绝："
+            + (e instanceof IllegalArgumentException && e.getMessage() != null
+                ? e.getMessage()
+                : "参数不完整或格式不正确")
+            + "。请只使用 describe_dataset 返回的 id，修正后重新调用 run_query。";
       }
       try {
         var rows = query.run(plan);

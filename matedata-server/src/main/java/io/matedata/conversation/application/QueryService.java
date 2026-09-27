@@ -79,20 +79,47 @@ public class QueryService {
         var turn =
             new QueryAgent.Turn(
                 question, permittedModel, user, id, sessionKey(user, conversation, fingerprint));
+        var lookups = new java.util.concurrent.atomic.AtomicInteger();
         QueryAgent.GovernedQuery query =
-            requested -> {
-              if (holder.get() != null) throw new IllegalArgumentException("本问题已完成查询");
-              try {
-                var done =
-                    governed(
-                        user, datasetId, model, grant, fingerprint, requested, steps, active, sql);
-                holder.set(done);
-                return new QueryAgent.Rows(
-                    done.result().columns(), done.result().rows(), !grant.rowFilters().isEmpty());
-              } catch (RuntimeException e) {
-                throw e;
-              } catch (Exception e) {
-                throw new IllegalStateException("受治理查询执行失败", e);
+            new QueryAgent.GovernedQuery() {
+              @Override
+              public QueryAgent.Rows run(QueryPlan requested) {
+                if (holder.get() != null) throw new IllegalArgumentException("本问题已完成查询");
+                try {
+                  var done =
+                      governed(
+                          user,
+                          datasetId,
+                          model,
+                          grant,
+                          fingerprint,
+                          requested,
+                          steps,
+                          active,
+                          sql);
+                  holder.set(done);
+                  return new QueryAgent.Rows(
+                      done.result().columns(), done.result().rows(), !grant.rowFilters().isEmpty());
+                } catch (RuntimeException e) {
+                  throw e;
+                } catch (Exception e) {
+                  throw new IllegalStateException("受治理查询执行失败", e);
+                }
+              }
+
+              @Override
+              public QueryAgent.Values values(ValuesPlan requested) {
+                if (lookups.incrementAndGet() > MAX_VALUE_LOOKUPS)
+                  throw new IllegalArgumentException(
+                      "每个问题最多查询 " + MAX_VALUE_LOOKUPS + " 次维度值，请直接使用已获得的取值");
+                try {
+                  return governedValues(
+                      user, datasetId, model, grant, fingerprint, requested, steps);
+                } catch (RuntimeException e) {
+                  throw e;
+                } catch (Exception e) {
+                  throw new IllegalStateException("维度值查询失败", e);
+                }
               }
             };
         active.set("智能体规划");
@@ -221,6 +248,52 @@ public class QueryService {
         new QueryRun.Step(
             "执行查询", "SUCCEEDED", "返回 " + result.rows().size() + " 行；语句执行超时 10 秒；分批读取", elapsed(t)));
     return new Executed(plan, compiled, result);
+  }
+
+  /** Dimension value lookups per question; each is a real, bounded query on the source. */
+  static final int MAX_VALUE_LOOKUPS = 3;
+
+  /** Distinct values under the same authorization, compilation and verification as queries. */
+  private QueryAgent.Values governedValues(
+      String user,
+      String datasetId,
+      SemanticModel model,
+      DatasetGrant grant,
+      String fingerprint,
+      ValuesPlan requested,
+      List<QueryRun.Step> steps)
+      throws Exception {
+    long t = System.nanoTime();
+    var plan = access.constrainValues(model, grant, requested);
+    var compiled = new SemanticCompiler().compileValues(model, plan);
+    new SqlGuard().verifyValues(compiled, model, plan);
+    verifyScope(user, datasetId, fingerprint);
+    var result = executor.values(model, plan, compiled);
+    verifyScope(user, datasetId, fingerprint);
+    var column = result.columns().getFirst();
+    var values =
+        result.rows().stream()
+            .limit(plan.limit())
+            .map(row -> row.get(column))
+            .map(
+                value ->
+                    value instanceof java.math.BigDecimal decimal
+                        ? decimal.toPlainString()
+                        : String.valueOf(value))
+            .toList();
+    boolean truncated = result.rows().size() > plan.limit();
+    steps.add(
+        new QueryRun.Step(
+            "维度值查询",
+            "SUCCEEDED",
+            plan.dimension()
+                + "：返回 "
+                + values.size()
+                + " 个取值"
+                + (truncated ? "，仍有更多" : "")
+                + "；已校验权限并参数绑定",
+            elapsed(t)));
+    return new QueryAgent.Values(values, truncated, !grant.rowFilters().isEmpty());
   }
 
   private static String summary(SemanticModel model, Executed executed) {

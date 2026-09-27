@@ -89,5 +89,11 @@ abstract class ExternalDatabaseContract {
         new JdbcQueryExecutor(catalog, connections)
             .execute(model, timePlan, new SemanticCompiler().compile(model, timePlan));
     assertThat(timed.rows().getFirst().get("clock")).isEqualTo("12:34:56.123456");
+    // Keyword lookups use the same LIKE ... ESCAPE syntax on every supported database.
+    var valuesPlan = new ValuesPlan("region", "华", Map.of(), 10);
+    var values =
+        new JdbcQueryExecutor(catalog, connections)
+            .values(model, valuesPlan, new SemanticCompiler().compileValues(model, valuesPlan));
+    assertThat(values.rows()).extracting(row -> row.get("region")).contains("华东");
   }
 }

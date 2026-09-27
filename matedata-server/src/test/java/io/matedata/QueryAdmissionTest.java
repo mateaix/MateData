@@ -265,4 +265,71 @@ class QueryAdmissionTest {
     agentService(unrestricted, agent).ask("alice", "销售额最低的两个品类", "sales", "agent", null);
     assertThat(scoped.get()).isFalse();
   }
+
+  @Test
+  void valueLookupsAreGrantedScopedVerifiedAndBounded() throws Exception {
+    var grants = mock(GrantRepository.class);
+    when(grants.find("alice", "sales"))
+        .thenReturn(
+            Optional.of(
+                new DatasetGrant(
+                    "alice",
+                    "sales",
+                    true,
+                    List.of("revenue"),
+                    List.of("category"),
+                    Map.of("region", "华东"))));
+    var f = fixture(grants, "ANALYST");
+    var executor = mock(QueryExecutor.class);
+    var lookedUp = new ArrayList<ValuesPlan>();
+    when(executor.values(any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              lookedUp.add(invocation.getArgument(1));
+              CompiledQuery compiled = invocation.getArgument(2);
+              assertThat(compiled.sql()).contains("region = ?", "LIKE ? ESCAPE '!'");
+              return new QueryExecutor.Result(
+                  List.of("category"),
+                  List.of(
+                      Map.of("category", "专业咨询"),
+                      Map.of("category", "智能硬件"),
+                      Map.of("category", "软件服务")));
+            });
+    var outcomes = new ArrayList<Object>();
+    var agent = mock(QueryAgent.class);
+    when(agent.answer(any(), any(), any()))
+        .thenAnswer(
+            invocation -> {
+              QueryAgent.GovernedQuery query = invocation.getArgument(1);
+              var found = query.values(new ValuesPlan("category", "咨询", Map.of("region", "华南"), 2));
+              outcomes.add(found);
+              for (var dimension : List.of("region", "category", "category"))
+                try {
+                  outcomes.add(query.values(new ValuesPlan(dimension, "咨询", Map.of(), 2)));
+                } catch (RuntimeException e) {
+                  outcomes.add(e.getMessage());
+                }
+              return new QueryAgent.Reply("");
+            });
+    var run =
+        new QueryService(f.models(), f.runs(), agent, executor, f.access())
+            .ask("alice", "咨询类销售额", "sales", "agent", null);
+
+    // Requested filters are ignored; the user's row filter is always applied.
+    assertThat(lookedUp.getFirst())
+        .isEqualTo(new ValuesPlan("category", "咨询", Map.of("region", "华东"), 2));
+    var first = (QueryAgent.Values) outcomes.getFirst();
+    assertThat(first.values()).containsExactly("专业咨询", "智能硬件");
+    assertThat(first.truncated()).isTrue();
+    assertThat(first.rowScoped()).isTrue();
+    // region is not a granted dimension; the fourth lookup exceeds the per-question cap.
+    assertThat(outcomes.get(1)).asString().contains("未知维度");
+    assertThat(outcomes.get(2)).isInstanceOf(QueryAgent.Values.class);
+    assertThat(outcomes.get(3)).asString().contains("最多查询 3 次");
+    assertThat(lookedUp).hasSize(2);
+    assertThat(run.steps())
+        .filteredOn(step -> step.name().equals("维度值查询"))
+        .hasSize(2)
+        .allSatisfy(step -> assertThat(step.detail()).doesNotContain("咨询"));
+  }
 }

@@ -6,8 +6,20 @@ import net.sf.jsqlparser.statement.select.PlainSelect;
 /** Fail-closed: AST validation plus exact equivalence to our trusted semantic compiler. */
 public final class SqlGuard {
   public void verify(CompiledQuery query, SemanticModel model, QueryPlan plan) {
-    var expected = new SemanticCompiler().compile(model, plan);
+    requireEqual(new SemanticCompiler().compile(model, plan), query);
+    requireSingleTableSelect(query);
+  }
+
+  public void verifyValues(CompiledQuery query, SemanticModel model, ValuesPlan plan) {
+    requireEqual(new SemanticCompiler().compileValues(model, plan), query);
+    requireSingleTableSelect(query);
+  }
+
+  private static void requireEqual(CompiledQuery expected, CompiledQuery query) {
     if (!expected.equals(query)) throw new IllegalArgumentException("SQL 与已授权语义计划不匹配");
+  }
+
+  private static void requireSingleTableSelect(CompiledQuery query) {
     try {
       var statements = CCJSqlParserUtil.parseStatements(query.sql());
       if (statements.size() != 1

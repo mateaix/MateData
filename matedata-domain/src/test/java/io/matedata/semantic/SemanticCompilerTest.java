@@ -141,6 +141,74 @@ class SemanticCompilerTest {
   }
 
   @Test
+  void valuesLookupsCompileToBoundedDistinctSelects() {
+    var plain = compiler.compileValues(sales, new ValuesPlan("region", null, Map.of(), 20));
+    assertThat(plain.sql())
+        .isEqualTo(
+            "SELECT DISTINCT region AS \"region\" FROM sales WHERE region IS NOT NULL ORDER BY 1 ASC LIMIT 21");
+    assertThat(plain.parameters()).isEmpty();
+
+    var filtered =
+        compiler.compileValues(
+            sales, new ValuesPlan("region", " 50%_! ", Map.of("channel", "直销"), 5));
+    assertThat(filtered.sql())
+        .isEqualTo(
+            "SELECT DISTINCT region AS \"region\" FROM sales WHERE region IS NOT NULL"
+                + " AND channel = ? AND region LIKE ? ESCAPE '!' ORDER BY 1 ASC LIMIT 6");
+    assertThat(filtered.parameters()).containsExactly("直销", "%50!%!_!!%");
+    new SqlGuard()
+        .verifyValues(
+            filtered, sales, new ValuesPlan("region", "50%_!", Map.of("channel", "直销"), 5));
+  }
+
+  @Test
+  void valuesLookupsRejectUnknownDimensionsBadLimitsAndNonTextKeywords() {
+    for (var plan :
+        List.of(
+            new ValuesPlan("secret", null, Map.of(), 10),
+            new ValuesPlan("region", null, Map.of(), 0),
+            new ValuesPlan("region", null, Map.of(), 51),
+            new ValuesPlan("region", "x".repeat(51), Map.of(), 10)))
+      assertThatThrownBy(() -> compiler.compileValues(sales, plan))
+          .as(plan.toString())
+          .isInstanceOf(IllegalArgumentException.class);
+    var numeric =
+        new SemanticModel(
+            "n",
+            "N",
+            "",
+            "s",
+            "t",
+            List.of(new SemanticModel.Metric("m", "M", "m", "SUM", List.of())),
+            List.of(
+                new SemanticModel.Dimension("year", "年份", "year", List.of(), ValueType.NUMBER)));
+    assertThatThrownBy(
+            () -> compiler.compileValues(numeric, new ValuesPlan("year", "20", Map.of(), 10)))
+        .hasMessageContaining("文本");
+    assertThat(compiler.compileValues(numeric, new ValuesPlan("year", null, Map.of(), 10)).sql())
+        .contains("SELECT DISTINCT year");
+  }
+
+  @Test
+  void theGuardRejectsValuesLookupsThatDifferFromTheirPlan() {
+    var plan = new ValuesPlan("region", "华东", Map.of(), 10);
+    var compiled = compiler.compileValues(sales, plan);
+    assertThatThrownBy(
+            () ->
+                new SqlGuard()
+                    .verifyValues(compiled, sales, new ValuesPlan("region", "华南", Map.of(), 10)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                new SqlGuard()
+                    .verifyValues(
+                        compiled,
+                        sales,
+                        new ValuesPlan("region", "华东", Map.of("channel", "直销"), 10)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void quotedPhysicalIdentifiersPreserveCaseAndDatabaseDialect() {
     var metric = new SemanticModel.Metric("Value", "金额", "Amount", "SUM", List.of());
     var dimension = new SemanticModel.Dimension("value", "分组", "Region", List.of());
