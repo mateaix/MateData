@@ -22,6 +22,7 @@ public class QueryService {
   private final RunRepository runs;
   private final QueryAgent agent;
   private final QueryExecutor executor;
+  private final QueryCoordinator coordinator = new QueryCoordinator();
   private final Semaphore slots = new Semaphore(8);
   private final DataAccessService access;
 
@@ -43,6 +44,62 @@ public class QueryService {
 
   public QueryRun ask(
       String user, String question, String datasetId, String mode, String conversationId) {
+    return ask(user, question, datasetId, mode, conversationId, null);
+  }
+
+  public QueryRun ask(
+      String user,
+      String question,
+      String datasetId,
+      String mode,
+      String conversationId,
+      String idempotencyKey) {
+    if (idempotencyKey != null && !idempotencyKey.matches("[A-Za-z0-9_-]{1,128}"))
+      throw new IllegalArgumentException("Idempotency-Key 需为 1–128 位字母、数字、下划线或短横线");
+    if (conversationId != null && !conversationId.matches("[A-Za-z0-9-]{1,64}"))
+      throw new IllegalArgumentException("会话标识不合法");
+    String runId =
+        idempotencyKey == null
+            ? UUID.randomUUID().toString()
+            : "request-" + digest(user + "\n" + idempotencyKey).substring(0, 48);
+    try (var requestLease = coordinator.acquire("request:" + user + ":" + runId)) {
+      var prior = idempotencyKey == null ? Optional.<QueryRun>empty() : runs.find(user, runId);
+      if (prior.isPresent()) {
+        var saved = prior.get();
+        if (!Objects.equals(question, saved.question())
+            || !Objects.equals(datasetId, saved.datasetId())
+            || !Objects.equals(mode, saved.mode())
+            || !Objects.equals(
+                conversationId == null ? runId : conversationId, saved.conversationId()))
+          throw new ApplicationException(Kind.CONFLICT, "该幂等键已用于不同的查询请求");
+        verifyScope(user, saved.datasetId(), saved.scopeFingerprint());
+        return saved;
+      }
+      String conversation = conversationId == null ? runId : conversationId;
+      try (var conversationLease =
+          coordinator.acquire("conversation:" + user + ":" + conversation)) {
+        return execute(user, question, datasetId, mode, conversation, runId);
+      }
+    }
+  }
+
+  private static String digest(String value) {
+    try {
+      return HexFormat.of()
+          .formatHex(
+              MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+    } catch (java.security.NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private QueryRun execute(
+      String user,
+      String question,
+      String datasetId,
+      String mode,
+      String conversationId,
+      String runId) {
     if (question == null || question.isBlank() || question.length() > 2000)
       throw new IllegalArgumentException("问题长度需为 1–2000 字符");
     if (!Set.of("demo", "agent").contains(mode == null ? "" : mode))
@@ -58,7 +115,7 @@ public class QueryService {
     String fingerprint = AuthorizationFingerprint.of(model, grant);
     if (!slots.tryAcquire()) throw new ApplicationException(Kind.BUSY, "并发任务已满，请稍后重试");
     long start = System.nanoTime();
-    String id = UUID.randomUUID().toString(), created = Instant.now().toString();
+    String id = runId, created = Instant.now().toString();
     String conversation = conversationId == null ? UUID.randomUUID().toString() : conversationId;
     var steps = new java.util.concurrent.CopyOnWriteArrayList<QueryRun.Step>();
     var sql = new AtomicReference<>("");
@@ -135,6 +192,7 @@ public class QueryService {
         if (executed == null) {
           if (reply.answer().isBlank())
             throw new IllegalArgumentException("智能体未执行查询，请明确要分析的指标和维度后重试");
+          verifyScope(user, datasetId, fingerprint);
           var run =
               new QueryRun(
                       id,
@@ -149,14 +207,26 @@ public class QueryService {
                       0,
                       elapsed(start),
                       created,
-                      reply.answer(),
+                      AnswerGrounding.clarification(reply.answer()),
                       null,
                       steps)
                   .withScope(fingerprint);
           runs.save(user, run);
           return run;
         }
-        answer = reply.answer().isBlank() ? summary(model, executed) : reply.answer();
+        boolean supported = AnswerGrounding.supported(reply.answer(), executed.result().rows());
+        answer = supported ? reply.answer() : summary(model, executed);
+        steps.add(
+            new QueryRun.Step(
+                "回答校验",
+                "SUCCEEDED",
+                supported ? "数值引用与结果匹配；不代表自然语言含义或因果已验证" : "解读缺少可核验数值证据或不可用，已使用平台摘要",
+                0));
+        if (!grant.rowFilters().isEmpty()) answer += "\n结果仅限当前用户有权查看的数据范围。";
+        if (executed.result().rows().size() >= executed.plan().limit())
+          answer += "\n结果达到查询行数上限，不代表完整数据。";
+        // Permissions may change during the model's interpretation after the JDBC call returns.
+        verifyScope(user, datasetId, fingerprint);
       }
       var result = executed.result();
       var run =

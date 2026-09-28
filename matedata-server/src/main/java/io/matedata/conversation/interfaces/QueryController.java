@@ -27,11 +27,19 @@ public class QueryController {
   public record Ask(String question, String datasetId, String mode, String conversationId) {}
 
   @PostMapping("/queries")
-  public QueryRun ask(@RequestBody Ask ask, HttpServletRequest request) {
+  public QueryRun ask(
+      @RequestBody Ask ask,
+      @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+      HttpServletRequest request) {
     var u = Access.analyst(request);
     var run =
         queries.ask(
-            u.username(), ask.question(), ask.datasetId(), ask.mode(), ask.conversationId());
+            u.username(),
+            ask.question(),
+            ask.datasetId(),
+            ask.mode(),
+            ask.conversationId(),
+            idempotencyKey);
     audit.record(u.username(), "QUERY_" + run.status(), run.id());
     return response(run);
   }

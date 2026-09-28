@@ -30,6 +30,68 @@ class QueryAdmissionTest {
   }
 
   @Test
+  void sameConversationNeverExecutesOverlappingAgentTurns() throws Exception {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    var firstEntered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var secondEntered = new CountDownLatch(1);
+    var calls = new java.util.concurrent.atomic.AtomicInteger();
+    QueryAgent agent =
+        (turn, query, observer) -> {
+          if (calls.incrementAndGet() == 1) {
+            firstEntered.countDown();
+            try {
+              if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("deadline");
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IllegalStateException(e);
+            }
+          } else secondEntered.countDown();
+          query.run(new QueryPlan("revenue", "region", Map.of(), 10));
+          return new QueryAgent.Reply("");
+        };
+    var service = agentService(f, agent);
+    try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      var first = pool.submit(() -> service.ask("alice", "销售额", "sales", "agent", "same"));
+      try {
+        assertThat(firstEntered.await(2, TimeUnit.SECONDS)).isTrue();
+        var second = pool.submit(() -> service.ask("alice", "那区域呢", "sales", "agent", "same"));
+        assertThat(secondEntered.await(200, TimeUnit.MILLISECONDS)).isFalse();
+        release.countDown();
+        assertThat(second.get(3, TimeUnit.SECONDS).status()).isEqualTo("SUCCEEDED");
+      } finally {
+        release.countDown();
+      }
+      assertThat(first.get(3, TimeUnit.SECONDS).status()).isEqualTo("SUCCEEDED");
+    }
+  }
+
+  @Test
+  void inventedNumbersFallBackToPlatformSummaryWithoutLosingRows() throws Exception {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    QueryAgent agent =
+        (turn, query, observer) -> {
+          query.run(new QueryPlan("revenue", "region", Map.of(), 10));
+          return new QueryAgent.Reply("华东销售额是999999元，同比增长42%。");
+        };
+    var run = agentService(f, agent).ask("alice", "各区域销售额", "sales", "agent", null);
+    assertThat(run.status()).isEqualTo("SUCCEEDED");
+    assertThat(run.rows()).hasSize(1);
+    assertThat(run.answer()).doesNotContain("999999", "42%");
+    assertThat(run.steps()).extracting(QueryRun.Step::name).contains("回答校验");
+  }
+
+  @Test
+  void anUngroundedNonNumericConclusionIsNotPresentedAsClarification() throws Exception {
+    var f = fixture(mock(GrantRepository.class), "ADMIN");
+    QueryAgent agent = (turn, query, observer) -> new QueryAgent.Reply("华东是销售额最高的区域。");
+    var run = agentService(f, agent).ask("alice", "各区域销售额", "sales", "agent", null);
+    assertThat(run.status()).isEqualTo("NEEDS_INPUT");
+    assertThat(run.answer()).doesNotContain("华东是销售额最高");
+    assertThat(run.answer()).contains("明确");
+  }
+
+  @Test
   void ninthConcurrentQueryIsRejectedAndSlotsAreReleasedAfterCompletion() throws Exception {
     var f = fixture(mock(GrantRepository.class), "ADMIN");
     var entered = new CountDownLatch(8);

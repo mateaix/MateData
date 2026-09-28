@@ -37,3 +37,25 @@ Mutation bodies are limited to 256 KiB, including chunked transfer; larger bodie
 Published dimension `valueType` is inferred from database metadata (TEXT/NUMBER/BOOLEAN/DATE/TIME/TIMESTAMP/TIMESTAMP_WITH_ZONE), not trusted from incoming definitions. Filter values are strings at the planning boundary and are parsed into exact typed JDBC values; temporal input uses ISO notation. Temporal result cells are ISO strings, preserving fractional time precision.
 
 Publishing SUM/AVG metrics requires a numeric physical column. Metric/dimension names and supplied aliases cannot be null or blank. Successful create/update responses contain the canonical physical table/column names and dialect; refresh GET `/datasets` to obtain the current scope fingerprint.
+
+## Query coordination and evidence checks
+
+`POST /queries` accepts optional `Idempotency-Key` (1–128 ASCII letters, digits, `_` or `-`).
+Reuse it only with the identical question, dataset, mode and conversationId. The key is scoped
+by authenticated username. Once a run is saved, retries return that same run (including saved
+failures), across restarts. Different payloads return `409 CONFLICT`; replay still checks current
+authorization/model scope. Use a new key for an intentional new run. A crash before persistence
+may execute the read-only query again; this is not an exactly-once transaction with the model.
+
+Same-user, same-conversation turns execute serially within this single application process.
+Waiting more than one second for the conversation or idempotency key returns `429 BUSY`;
+clients may retry the identical request with the same key. Independent conversations retain
+the existing global eight-query limit. Do not run multiple instances against the same state directory.
+
+After a governed query, numeric references in the interpretation are compared with result cells
+using exact decimal values, including comma formatting and 万/亿 scaling. Unsupported numeric
+claims, percentages/comparisons and empty results use the platform summary instead. The run
+keeps its authoritative rows and a 回答校验 step. This is a conservative numeric check, not proof
+of correct label/value attribution, comparative language or causality. Replies without a query
+are constrained to a short clarification or replaced with a platform clarification (`NEEDS_INPUT`).
+Authorization is checked again after interpretation, before returning successful results.

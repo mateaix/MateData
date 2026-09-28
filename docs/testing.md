@@ -55,7 +55,7 @@ export MATEDATA_TEST_POSTGRES_ADMIN_PASSWORD='your-disposable-test-password'
 - MySQL 26.7.0 与 PostgreSQL 18.6 已使用独立本地实例运行同一 JDBC 行为合同；包括金额、数字筛选、日期和微秒时间精度。
 - Docker Compose 配置可解析，当前机器未启动 Docker daemon；不代表镜像构建与容器运行通过。
 - 真实供应商模型质量依赖模型配置，用平台评测中心执行；本地模型协议测试不评判语义智能质量。
-- GitHub Actions 工作流已写入，未推送仓库，因此没有远程 CI 运行结果。
+- GitHub Actions 在独立 PostgreSQL 18 / MySQL 8.4 服务上初始化 `scripts/ci/*.sql` fixture，再运行完整构建。`scripts/ci/check_database_reports.py` 要求数据库合同、PostgreSQL 系统边界与取消测试全部执行成功，不能跳过。仅本地未配置数据库变量时允许跳过。
 
 ## 单包重启烟测
 
@@ -100,3 +100,15 @@ INSERT INTO tiny_alias_capacity_test VALUES (1,0,0,0),(2,1,1,1),(3,2,2,2);
 `SecurityPolicyTest` 和 `SystemObjectBoundaryTest` 验证登记、连接重开与元数据过滤中的系统对象拒绝。`PostgresSystemBoundaryTest` 与查询取消测试共用显式 `MATEDATA_TEST_POSTGRES_ADMIN_URL` 开关；需要管理员具备在**专用隔离测试库**创建 schema 并向只读测试用户授权的能力。
 
 该测试创建随机名称的两个临时 schema，验证隐式 pg_catalog 同名解析、旧模型未加引号名称折叠、合法业务同名表和删除后 search_path 回退。finally 清理自己创建的 schema。不能在生产库启用该测试。普通未指定管理员 URL 的构建会跳过它。
+
+## 会话一致性与回答校验
+
+`QueryAdmissionTest` 验证同会话串行、不同会话并发、回答数值回退与无查询结论拦截。
+`QueryIdempotencyTest` 使用真实 H2 持久化验证重试复用、服务重建、用户隔离、冲突及授权撤销。
+`QueryCoordinatorTest` 验证等待超时后原持有者与后续请求仍可正常运行；
+`PlatformIntegrationTest` 通过 HTTP 验证幂等请求头。
+`AnswerGroundingTest` 验证精确金额与单位换算、未知数字、百分比、中文数词和空结果。
+数据库合同还关闭 JDBC 只读提示后尝试无匹配行的 DELETE，确认数据库账户本身没有写权限。
+
+CI 中的 `ci-reader-only` 和 `ci-admin-only` 仅用于每次运行后销毁的测试服务，不是应用凭证。
+不得在真实业务数据库执行这些初始化 SQL。

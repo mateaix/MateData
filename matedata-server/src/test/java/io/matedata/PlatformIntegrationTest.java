@@ -58,6 +58,38 @@ class PlatformIntegrationTest {
   }
 
   @Test
+  void queryIdempotencyHeaderReplaysTheSameRunAndRejectsPayloadChanges() throws Exception {
+    var client = loggedIn();
+    String key = java.util.UUID.randomUUID().toString();
+    var request =
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/v1/queries"))
+            .header("X-MateData-Request", "1")
+            .header("Content-Type", "application/json")
+            .header("Idempotency-Key", key);
+    String body =
+        json.writeValueAsString(Map.of("question", "各区域销售额", "datasetId", "sales", "mode", "demo"));
+    var first =
+        client.send(
+            request.POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+            HttpResponse.BodyHandlers.ofString());
+    var second =
+        client.send(
+            request.POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertThat(first.statusCode()).isEqualTo(200);
+    assertThat(second.statusCode()).isEqualTo(200);
+    assertThat(json.readTree(second.body()).path("id"))
+        .isEqualTo(json.readTree(first.body()).path("id"));
+    var conflict =
+        client.send(
+            request
+                .POST(HttpRequest.BodyPublishers.ofString(body.replace("各区域销售额", "各品类利润")))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertThat(conflict.statusCode()).isEqualTo(409);
+  }
+
+  @Test
   void rejectsChunkedOversizedJsonBeforeLoginProcessing() throws Exception {
     byte[] body = new byte[256 * 1024 + 1];
     var request =

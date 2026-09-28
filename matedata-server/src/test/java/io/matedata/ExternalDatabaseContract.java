@@ -37,6 +37,16 @@ abstract class ExternalDatabaseContract {
             System.getenv().getOrDefault("MATEDATA_TEST_" + envPrefix + "_USER", "matedata_reader"),
             System.getenv().getOrDefault("MATEDATA_TEST_" + envPrefix + "_PASSWORD", ""));
     assertThat(catalog.test(source.id()).get("success")).isEqualTo(true);
+    // Verify actual grants rather than only the driver's read-only hint. No row can be changed.
+    try (var connection = connections.open(catalog.require(source.id()))) {
+      connection.setReadOnly(false);
+      String tableName = type.equals("MYSQL") ? "`Sales_Data`" : "\"Sales_Data\"";
+      try (var statement = connection.createStatement()) {
+        assertThatThrownBy(() -> statement.executeUpdate("DELETE FROM " + tableName + " WHERE 1=0"))
+            .isInstanceOfSatisfying(
+                java.sql.SQLException.class, e -> assertThat(e.getSQLState()).startsWith("42"));
+      }
+    }
     var table =
         catalog.tables(source.id()).stream()
             .filter(t -> t.name().equals("Sales_Data"))

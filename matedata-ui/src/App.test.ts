@@ -982,3 +982,31 @@ it("offers Ollama without an API key and fills its local address", async () => {
   await flushPromises();
   expect(vm.model.baseUrl).toBe("http://gpu-box:11434");
 });
+
+it("sends independent idempotency keys even when secure-context randomUUID is unavailable", async () => {
+  await start();
+  const vm = state();
+  vm.datasetId = "sales";
+  const unavailable = vi.spyOn(crypto, "randomUUID").mockImplementation(() => {
+    throw new Error("randomUUID is unavailable on an HTTP LAN origin");
+  });
+  const keys: string[] = [];
+  api.mockImplementation(async (path, init) => {
+    if (path === "/queries") {
+      keys.push(new Headers(init?.headers).get("Idempotency-Key") ?? "");
+      throw new ApiError("test response", 503);
+    }
+    return [];
+  });
+  try {
+    vm.question = "各区域销售额";
+    await vm.ask();
+    vm.question = "各品类利润";
+    await vm.ask();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/^[a-zA-Z0-9_-]{1,128}$/);
+    expect(keys[1]).not.toBe(keys[0]);
+  } finally {
+    unavailable.mockRestore();
+  }
+});

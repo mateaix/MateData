@@ -459,6 +459,12 @@ async function ask() {
   await handle(async () => {
     const value = await request<Run>("/queries", {
       method: "POST",
+      headers: {
+        "Idempotency-Key": Array.from(
+          crypto.getRandomValues(new Uint8Array(16)),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join(""),
+      },
       body: json({
         question: question.value.trim(),
         datasetId: requestedDataset,
